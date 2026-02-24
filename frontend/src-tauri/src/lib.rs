@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Mutex as StdMutex;
 // Removed unused import
 
@@ -36,16 +36,16 @@ pub(crate) use perf_trace;
 
 // Declare audio module
 pub mod analytics;
+pub mod anthropic;
 pub mod api;
 pub mod audio;
 pub mod console_utils;
 pub mod database;
+pub mod groq;
 pub mod notifications;
 pub mod ollama;
 pub mod onboarding;
 pub mod openai;
-pub mod anthropic;
-pub mod groq;
 pub mod openrouter;
 pub mod parakeet_engine;
 pub mod state;
@@ -54,7 +54,7 @@ pub mod tray;
 pub mod utils;
 pub mod whisper_engine;
 
-use audio::{list_audio_devices, AudioDevice, trigger_audio_permission};
+use audio::{list_audio_devices, trigger_audio_permission, AudioDevice};
 use log::{error as log_error, info as log_info};
 use notifications::commands::NotificationManagerState;
 use std::sync::Arc;
@@ -62,6 +62,10 @@ use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::RwLock;
 
 static RECORDING_FLAG: AtomicBool = AtomicBool::new(false);
+static ASR_GATEWAY_ENABLED: AtomicBool = AtomicBool::new(true);
+static ASR_GATEWAY_PORT: AtomicU16 = AtomicU16::new(8765);
+static ASR_ENGINE_T_ONE_ENABLED: AtomicBool = AtomicBool::new(true);
+static ASR_ENGINE_GIGAAM_ENABLED: AtomicBool = AtomicBool::new(true);
 
 // Global language preference storage (default to "auto-translate" for automatic translation to English)
 static LANGUAGE_PREFERENCE: std::sync::LazyLock<StdMutex<String>> =
@@ -123,10 +127,7 @@ async fn start_recording<R: Runtime>(
             )
             .await
             {
-                log_error!(
-                    "Failed to show recording started notification: {}",
-                    e
-                );
+                log_error!("Failed to show recording started notification: {}", e);
             } else {
                 log_info!("Successfully showed recording started notification");
             }
@@ -184,10 +185,7 @@ async fn stop_recording<R: Runtime>(app: AppHandle<R>, args: RecordingArgs) -> R
             )
             .await
             {
-                log_error!(
-                    "Failed to show recording stopped notification: {}",
-                    e
-                );
+                log_error!("Failed to show recording stopped notification: {}", e);
             } else {
                 log_info!("Successfully showed recording stopped notification");
             }
@@ -356,10 +354,7 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
             )
             .await
             {
-                log_error!(
-                    "Failed to show recording started notification: {}",
-                    e
-                );
+                log_error!("Failed to show recording started notification: {}", e);
             }
 
             Ok(())
@@ -396,6 +391,45 @@ pub fn get_language_preference_internal() -> Option<String> {
     LANGUAGE_PREFERENCE.lock().ok().map(|lang| lang.clone())
 }
 
+#[tauri::command]
+async fn set_asr_gateway_config(
+    enabled: bool,
+    port: Option<u16>,
+    t_one_enabled: Option<bool>,
+    gigaam_enabled: Option<bool>,
+) -> Result<(), String> {
+    ASR_GATEWAY_ENABLED.store(enabled, Ordering::SeqCst);
+    if let Some(p) = port {
+        ASR_GATEWAY_PORT.store(p, Ordering::SeqCst);
+    }
+    if let Some(v) = t_one_enabled {
+        ASR_ENGINE_T_ONE_ENABLED.store(v, Ordering::SeqCst);
+    }
+    if let Some(v) = gigaam_enabled {
+        ASR_ENGINE_GIGAAM_ENABLED.store(v, Ordering::SeqCst);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_asr_gateway_config() -> Result<(bool, u16, bool, bool), String> {
+    Ok((
+        ASR_GATEWAY_ENABLED.load(Ordering::SeqCst),
+        ASR_GATEWAY_PORT.load(Ordering::SeqCst),
+        ASR_ENGINE_T_ONE_ENABLED.load(Ordering::SeqCst),
+        ASR_ENGINE_GIGAAM_ENABLED.load(Ordering::SeqCst),
+    ))
+}
+
+pub fn get_asr_gateway_config_internal() -> (bool, u16, bool, bool) {
+    (
+        ASR_GATEWAY_ENABLED.load(Ordering::SeqCst),
+        ASR_GATEWAY_PORT.load(Ordering::SeqCst),
+        ASR_ENGINE_T_ONE_ENABLED.load(Ordering::SeqCst),
+        ASR_ENGINE_GIGAAM_ENABLED.load(Ordering::SeqCst),
+    )
+}
+
 pub fn run() {
     log::set_max_level(log::LevelFilter::Info);
 
@@ -410,7 +444,9 @@ pub fn run() {
             None::<notifications::manager::NotificationManager<tauri::Wry>>,
         )) as NotificationManagerState<tauri::Wry>)
         .manage(audio::init_system_audio_state())
-        .manage(summary::summary_engine::ModelManagerState(Arc::new(tokio::sync::Mutex::new(None))))
+        .manage(summary::summary_engine::ModelManagerState(Arc::new(
+            tokio::sync::Mutex::new(None),
+        )))
         .setup(|_app| {
             log::info!("Application setup complete");
 
@@ -424,7 +460,11 @@ pub fn run() {
             let app_for_notif = _app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let notif_state = app_for_notif.state::<NotificationManagerState<tauri::Wry>>();
-                match notifications::commands::initialize_notification_manager(app_for_notif.clone()).await {
+                match notifications::commands::initialize_notification_manager(
+                    app_for_notif.clone(),
+                )
+                .await
+                {
                     Ok(manager) => {
                         // Set default consent and permissions on first launch
                         if let Err(e) = manager.set_consent(true).await {
@@ -468,7 +508,11 @@ pub fn run() {
             // Initialize ModelManager for summary engine (async, non-blocking)
             let app_handle_for_model_manager = _app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                match summary::summary_engine::commands::init_model_manager_at_startup(&app_handle_for_model_manager).await {
+                match summary::summary_engine::commands::init_model_manager_at_startup(
+                    &app_handle_for_model_manager,
+                )
+                .await
+                {
                     Ok(_) => log::info!("ModelManager initialized successfully at startup"),
                     Err(e) => {
                         log::warn!("Failed to initialize ModelManager at startup: {}", e);
@@ -497,7 +541,10 @@ pub fn run() {
             log::info!("Initializing bundled templates directory...");
             if let Ok(resource_path) = _app.handle().path().resource_dir() {
                 let templates_dir = resource_path.join("templates");
-                log::info!("Setting bundled templates directory to: {:?}", templates_dir);
+                log::info!(
+                    "Setting bundled templates directory to: {:?}",
+                    templates_dir
+                );
                 summary::templates::set_bundled_templates_dir(templates_dir);
             } else {
                 log::warn!("Failed to resolve resource directory for templates");
@@ -631,6 +678,8 @@ pub fn run() {
             api::api_get_meeting_transcripts,
             api::api_save_meeting_title,
             api::api_save_transcript,
+            api::api_replace_meeting_transcripts,
+            api::api_find_meeting_audio_file,
             api::open_meeting_folder,
             api::test_backend_connection,
             api::debug_backend_connection,
@@ -670,6 +719,8 @@ pub fn run() {
             // Language preference commands
             get_language_preference,
             set_language_preference,
+            set_asr_gateway_config,
+            get_asr_gateway_config,
             // Notification system commands
             notifications::commands::get_notification_settings,
             notifications::commands::set_notification_settings,
@@ -732,7 +783,9 @@ pub fn run() {
                             log::info!("Database cleanup completed successfully");
                         }
                     } else {
-                        log::warn!("AppState not available for database cleanup (likely first launch)");
+                        log::warn!(
+                            "AppState not available for database cleanup (likely first launch)"
+                        );
                     }
 
                     // Clean up sidecar

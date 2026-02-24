@@ -2,6 +2,7 @@
 //
 // Parallel transcription worker pool and chunk processing logic.
 
+use super::asr_gateway_client::AsrGatewayClient;
 use super::engine::TranscriptionEngine;
 use super::provider::TranscriptionError;
 use crate::audio::AudioChunk;
@@ -20,7 +21,10 @@ static SPEECH_DETECTED_EMITTED: AtomicBool = AtomicBool::new(false);
 /// Reset the speech detected flag for a new recording session
 pub fn reset_speech_detected_flag() {
     SPEECH_DETECTED_EMITTED.store(false, Ordering::SeqCst);
-    info!("🔍 SPEECH_DETECTED_EMITTED reset to: {}", SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst));
+    info!(
+        "🔍 SPEECH_DETECTED_EMITTED reset to: {}",
+        SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst)
+    );
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -35,7 +39,7 @@ pub struct TranscriptUpdate {
     // NEW: Recording-relative timestamps for playback sync
     pub audio_start_time: f64, // Seconds from recording start (e.g., 125.3)
     pub audio_end_time: f64,   // Seconds from recording start (e.g., 128.6)
-    pub duration: f64,          // Segment duration in seconds (e.g., 3.3)
+    pub duration: f64,         // Segment duration in seconds (e.g., 3.3)
 }
 
 // NOTE: get_transcript_history and get_recording_meeting_name functions
@@ -49,8 +53,63 @@ pub fn start_transcription_task<R: Runtime>(
     tokio::spawn(async move {
         info!("🚀 Starting optimized parallel transcription task - guaranteeing zero chunk loss");
 
-        // Initialize transcription engine (Whisper or Parakeet based on config)
-        let transcription_engine = match super::engine::get_or_init_transcription_engine(&app).await {
+        let (asr_enabled, asr_port, t_one_enabled, gigaam_enabled) =
+            crate::get_asr_gateway_config_internal();
+        let live_asr_only = asr_enabled && (t_one_enabled || gigaam_enabled);
+
+        if live_asr_only {
+            info!("📡 Live ASR mode active: built-in transcription disabled for this session");
+            let mut selected_engines = Vec::new();
+            if t_one_enabled {
+                selected_engines.push("t_one".to_string());
+            }
+            if gigaam_enabled {
+                selected_engines.push("gigaam".to_string());
+            }
+
+            let mut asr_gateway =
+                AsrGatewayClient::connect(app.clone(), asr_port, selected_engines).await;
+            if asr_gateway.is_none() {
+                let _ = app.emit("transcription-error", serde_json::json!({
+                    "error": "asr_gateway_unavailable",
+                    "userMessage": "Live ASR is enabled but ASR service is unavailable. Check service status and port in Settings -> Live ASR.",
+                    "actionable": true
+                }));
+                return;
+            }
+
+            let mut receiver = transcription_receiver;
+            while let Some(chunk) = receiver.recv().await {
+                if let Some(client) = asr_gateway.as_mut() {
+                    client.send_audio_chunk(&chunk);
+                }
+            }
+
+            if let Some(client) = asr_gateway.as_mut() {
+                client.end_session();
+            }
+            // Give ASR service a brief window to flush final_segment messages after end_session.
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            let _ = app.emit(
+                "transcription-queue-complete",
+                serde_json::json!({
+                    "total_chunks": 0,
+                    "message": "Live ASR session closed"
+                }),
+            );
+            let _ = app.emit(
+                "transcription-complete",
+                serde_json::json!({
+                    "mode": "live_asr"
+                }),
+            );
+            info!("✅ Live ASR-only transcription task completed");
+            return;
+        }
+
+        // Initialize built-in transcription engine (Whisper or Parakeet based on config)
+        let transcription_engine = match super::engine::get_or_init_transcription_engine(&app).await
+        {
             Ok(engine) => engine,
             Err(e) => {
                 error!("Failed to initialize transcription engine: {}", e);
@@ -73,7 +132,14 @@ pub fn start_transcription_task<R: Runtime>(
         let chunks_completed = Arc::new(AtomicU64::new(0));
         let input_finished = Arc::new(AtomicBool::new(false));
 
-        info!("📊 Starting {} transcription worker{} (serial mode for ordered emission)", NUM_WORKERS, if NUM_WORKERS == 1 { "" } else { "s" });
+        info!(
+            "📊 Starting {} transcription worker{} (serial mode for ordered emission)",
+            NUM_WORKERS,
+            if NUM_WORKERS == 1 { "" } else { "s" }
+        );
+
+        // Built-in mode: no ASR gateway mirroring.
+        let mut asr_gateway: Option<AsrGatewayClient> = None;
 
         // Spawn worker tasks
         let mut worker_handles = Vec::new();
@@ -107,7 +173,10 @@ pub fn start_transcription_task<R: Runtime>(
                         worker_id, engine_name, current_model
                     );
                 } else {
-                    warn!("⚠️ Worker {} pre-validation: {} model not loaded - chunks may be skipped", worker_id, engine_name);
+                    warn!(
+                        "⚠️ Worker {} pre-validation: {} model not loaded - chunks may be skipped",
+                        worker_id, engine_name
+                    );
                 }
 
                 loop {
@@ -144,17 +213,14 @@ pub fn start_transcription_task<R: Runtime>(
                             let chunk_duration = chunk.data.len() as f64 / chunk.sample_rate as f64;
 
                             // Transcribe with provider-agnostic approach
-                            match transcribe_chunk_with_provider(
-                                &engine_clone,
-                                chunk,
-                                &app_clone,
-                            )
-                            .await
+                            match transcribe_chunk_with_provider(&engine_clone, chunk, &app_clone)
+                                .await
                             {
                                 Ok((transcript, confidence_opt, is_partial)) => {
                                     // Provider-aware confidence threshold
                                     let confidence_threshold = match &engine_clone {
-                                        TranscriptionEngine::Whisper(_) | TranscriptionEngine::Provider(_) => 0.3,
+                                        TranscriptionEngine::Whisper(_)
+                                        | TranscriptionEngine::Provider(_) => 0.3,
                                         TranscriptionEngine::Parakeet(_) => 0.0, // Parakeet has no confidence, accept all
                                     };
 
@@ -167,7 +233,8 @@ pub fn start_transcription_task<R: Runtime>(
                                           worker_id, transcript, confidence_str, is_partial, confidence_threshold);
 
                                     // Check confidence threshold (or accept if no confidence provided)
-                                    let meets_threshold = confidence_opt.map_or(true, |c| c >= confidence_threshold);
+                                    let meets_threshold =
+                                        confidence_opt.map_or(true, |c| c >= confidence_threshold);
 
                                     if !transcript.trim().is_empty() && meets_threshold {
                                         // PERFORMANCE: Only log transcription results, not every processing step
@@ -176,7 +243,8 @@ pub fn start_transcription_task<R: Runtime>(
 
                                         // Emit speech-detected event for frontend UX (only on first detection per session)
                                         // This is lightweight and provides better user feedback
-                                        let current_flag = SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst);
+                                        let current_flag =
+                                            SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst);
                                         info!("🔍 Checking speech-detected flag: current={}, will_emit={}", current_flag, !current_flag);
 
                                         if !current_flag {
@@ -192,7 +260,8 @@ pub fn start_transcription_task<R: Runtime>(
                                         }
 
                                         // Generate sequence ID and calculate timestamps FIRST
-                                        let sequence_id = SEQUENCE_COUNTER.fetch_add(1, Ordering::SeqCst);
+                                        let sequence_id =
+                                            SEQUENCE_COUNTER.fetch_add(1, Ordering::SeqCst);
                                         let audio_start_time = chunk_timestamp; // Already in seconds from recording start
                                         let audio_end_time = chunk_timestamp + chunk_duration;
 
@@ -245,13 +314,20 @@ pub fn start_transcription_task<R: Runtime>(
                                             continue;
                                         }
                                         TranscriptionError::ModelNotLoaded => {
-                                            warn!("Worker {}: Model unloaded during transcription", worker_id);
+                                            warn!(
+                                                "Worker {}: Model unloaded during transcription",
+                                                worker_id
+                                            );
                                             chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
                                             continue;
                                         }
                                         _ => {
-                                            warn!("Worker {}: Transcription failed: {}", worker_id, e);
-                                            let _ = app_clone.emit("transcription-warning", e.to_string());
+                                            warn!(
+                                                "Worker {}: Transcription failed: {}",
+                                                worker_id, e
+                                            );
+                                            let _ = app_clone
+                                                .emit("transcription-warning", e.to_string());
                                         }
                                     }
                                 }
@@ -329,10 +405,19 @@ pub fn start_transcription_task<R: Runtime>(
                 chunk.chunk_id, queued
             );
 
+            // Mirror original audio chunk stream to local ASR gateway (best-effort).
+            if let Some(client) = asr_gateway.as_mut() {
+                client.send_audio_chunk(&chunk);
+            }
+
             if let Err(_) = work_sender.send(chunk) {
                 error!("❌ Failed to send chunk to workers - this should not happen!");
                 break;
             }
+        }
+
+        if let Some(client) = asr_gateway.as_mut() {
+            client.end_session();
         }
 
         // Signal that input is finished

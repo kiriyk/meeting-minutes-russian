@@ -1,22 +1,22 @@
 "use client";
-import { useState, useEffect, useRef } from 'react';
-import { motion } from 'framer-motion';
-import { Summary, SummaryResponse } from '@/types';
-import { useSidebar } from '@/components/Sidebar/SidebarProvider';
-import Analytics from '@/lib/analytics';
-import { invoke } from '@tauri-apps/api/core';
-import { toast } from 'sonner';
-import { TranscriptPanel } from '@/components/MeetingDetails/TranscriptPanel';
-import { SummaryPanel } from '@/components/MeetingDetails/SummaryPanel';
-import { ModelConfig } from '@/components/ModelSettingsModal';
+import { useState, useEffect, useRef } from "react";
+import { motion } from "framer-motion";
+import { Summary, SummaryResponse } from "@/types";
+import { useSidebar } from "@/components/Sidebar/SidebarProvider";
+import Analytics from "@/lib/analytics";
+import { invoke } from "@tauri-apps/api/core";
+import { toast } from "sonner";
+import { TranscriptPanel } from "@/components/MeetingDetails/TranscriptPanel";
+import { SummaryPanel } from "@/components/MeetingDetails/SummaryPanel";
+import { ModelConfig } from "@/components/ModelSettingsModal";
 
 // Custom hooks
-import { useMeetingData } from '@/hooks/meeting-details/useMeetingData';
-import { useSummaryGeneration } from '@/hooks/meeting-details/useSummaryGeneration';
-import { useTemplates } from '@/hooks/meeting-details/useTemplates';
-import { useCopyOperations } from '@/hooks/meeting-details/useCopyOperations';
-import { useMeetingOperations } from '@/hooks/meeting-details/useMeetingOperations';
-import { useConfig } from '@/contexts/ConfigContext';
+import { useMeetingData } from "@/hooks/meeting-details/useMeetingData";
+import { useSummaryGeneration } from "@/hooks/meeting-details/useSummaryGeneration";
+import { useTemplates } from "@/hooks/meeting-details/useTemplates";
+import { useCopyOperations } from "@/hooks/meeting-details/useCopyOperations";
+import { useMeetingOperations } from "@/hooks/meeting-details/useMeetingOperations";
+import { useConfig } from "@/contexts/ConfigContext";
 
 export default function PageContent({
   meeting,
@@ -45,14 +45,14 @@ export default function PageContent({
   loadedCount?: number;
   onLoadMore?: () => void;
 }) {
-  console.log('📄 PAGE CONTENT: Initializing with data:', {
+  console.log("📄 PAGE CONTENT: Initializing with data:", {
     meetingId: meeting.id,
     summaryDataKeys: summaryData ? Object.keys(summaryData) : null,
-    transcriptsCount: meeting.transcripts?.length
+    transcriptsCount: meeting.transcripts?.length,
   });
 
   // State
-  const [customPrompt, setCustomPrompt] = useState<string>('');
+  const [customPrompt, setCustomPrompt] = useState<string>("");
   const [isRecording] = useState(false);
   const [summaryResponse] = useState<SummaryResponse | null>(null);
 
@@ -66,22 +66,26 @@ export default function PageContent({
   const { modelConfig, setModelConfig } = useConfig();
 
   // Custom hooks
-  const meetingData = useMeetingData({ meeting, summaryData, onMeetingUpdated });
+  const meetingData = useMeetingData({
+    meeting,
+    summaryData,
+    onMeetingUpdated,
+  });
   const templates = useTemplates();
 
   // Callback to register the modal open function
   const handleRegisterModalOpen = (openFn: () => void) => {
-    console.log('📝 Registering modal open function in PageContent');
+    console.log("📝 Registering modal open function in PageContent");
     openModelSettingsRef.current = openFn;
   };
 
   // Callback to trigger modal open (called from error handler)
   const handleOpenModelSettings = () => {
-    console.log('🔔 Opening model settings from PageContent');
+    console.log("🔔 Opening model settings from PageContent");
     if (openModelSettingsRef.current) {
       openModelSettingsRef.current();
     } else {
-      console.warn('⚠️ Modal open function not yet registered');
+      console.warn("⚠️ Modal open function not yet registered");
     }
   };
 
@@ -89,7 +93,7 @@ export default function PageContent({
   const handleSaveModelConfig = async (config?: ModelConfig) => {
     if (!config) return;
     try {
-      await invoke('api_save_model_config', {
+      await invoke("api_save_model_config", {
         provider: config.provider,
         model: config.model,
         whisperModel: config.whisperModel,
@@ -98,13 +102,13 @@ export default function PageContent({
       });
 
       // Emit event so ConfigContext and other listeners stay in sync
-      const { emit } = await import('@tauri-apps/api/event');
-      await emit('model-config-updated', config);
+      const { emit } = await import("@tauri-apps/api/event");
+      await emit("model-config-updated", config);
 
-      toast.success('Model settings saved successfully');
+      toast.success("Model settings saved successfully");
     } catch (error) {
-      console.error('Failed to save model config:', error);
-      toast.error('Failed to save model settings');
+      console.error("Failed to save model config:", error);
+      toast.error("Failed to save model settings");
     }
   };
 
@@ -130,11 +134,12 @@ export default function PageContent({
 
   const meetingOperations = useMeetingOperations({
     meeting,
+    onMeetingUpdated,
   });
 
   // Track page view
   useEffect(() => {
-    Analytics.trackPageView('meeting_details');
+    Analytics.trackPageView("meeting_details");
   }, []);
 
   // Auto-generate summary when flag is set
@@ -142,9 +147,15 @@ export default function PageContent({
     let cancelled = false;
 
     const autoGenerate = async () => {
-      if (shouldAutoGenerate && meetingData.transcripts.length > 0 && !cancelled) {
-        console.log(`🤖 Auto-generating summary with ${modelConfig.provider}/${modelConfig.model}...`);
-        await summaryGeneration.handleGenerateSummary('');
+      if (
+        shouldAutoGenerate &&
+        meetingData.transcripts.length > 0 &&
+        !cancelled
+      ) {
+        console.log(
+          `🤖 Auto-generating summary with ${modelConfig.provider}/${modelConfig.model}...`,
+        );
+        await summaryGeneration.handleGenerateSummary("");
 
         // Notify parent that auto-generation is complete (only if not cancelled)
         if (onAutoGenerateComplete && !cancelled) {
@@ -165,7 +176,7 @@ export default function PageContent({
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.3, ease: 'easeOut' }}
+      transition={{ duration: 0.3, ease: "easeOut" }}
       className="flex flex-col h-screen bg-gray-50"
     >
       <div className="flex flex-1 overflow-hidden">
@@ -220,6 +231,10 @@ export default function PageContent({
           onTemplateSelect={templates.handleTemplateSelection}
           isModelConfigLoading={false}
           onOpenModelSettings={handleRegisterModalOpen}
+          selectedOfflineEngine={meetingOperations.selectedOfflineEngine}
+          onOfflineEngineChange={meetingOperations.setSelectedOfflineEngine}
+          onRetranscribe={meetingOperations.handleRetranscribeWithGigaam}
+          isRetranscribing={meetingOperations.isRetranscribing}
         />
       </div>
     </motion.div>

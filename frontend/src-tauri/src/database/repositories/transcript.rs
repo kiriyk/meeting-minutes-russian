@@ -82,6 +82,70 @@ impl TranscriptsRepository {
         Ok(meeting_id)
     }
 
+    /// Replaces all transcript segments for an existing meeting in a single transaction.
+    pub async fn replace_meeting_transcripts(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        transcripts: &[TranscriptSegment],
+    ) -> Result<(), SqlxError> {
+        if meeting_id.trim().is_empty() {
+            return Err(SqlxError::Protocol(
+                "meeting_id cannot be empty".to_string(),
+            ));
+        }
+
+        let mut conn = pool.acquire().await?;
+        let mut transaction = conn.begin().await?;
+
+        let meeting_exists: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM meetings WHERE id = ?")
+            .bind(meeting_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+
+        if meeting_exists.is_none() {
+            transaction.rollback().await?;
+            return Err(SqlxError::RowNotFound);
+        }
+
+        sqlx::query("DELETE FROM transcripts WHERE meeting_id = ?")
+            .bind(meeting_id)
+            .execute(&mut *transaction)
+            .await?;
+
+        for segment in transcripts {
+            let transcript_id = format!("transcript-{}", Uuid::new_v4());
+            sqlx::query(
+                "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&transcript_id)
+            .bind(meeting_id)
+            .bind(&segment.text)
+            .bind(&segment.timestamp)
+            .bind(segment.audio_start_time)
+            .bind(segment.audio_end_time)
+            .bind(segment.duration)
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        let now = Utc::now();
+        sqlx::query("UPDATE meetings SET updated_at = ? WHERE id = ?")
+            .bind(now)
+            .bind(meeting_id)
+            .execute(&mut *transaction)
+            .await?;
+
+        transaction.commit().await?;
+
+        info!(
+            "Replaced transcripts for meeting {} with {} segments",
+            meeting_id,
+            transcripts.len()
+        );
+        Ok(())
+    }
+
     /// Searches for a query string within the transcripts.
     /// It returns a list of matching transcripts with context.
     pub async fn search_transcripts(

@@ -6,6 +6,7 @@ pub mod provider;
 pub mod whisper_provider;
 pub mod parakeet_provider;
 pub mod engine;
+pub mod asr_gateway_client;
 pub mod worker;
 
 // Re-export commonly used types
