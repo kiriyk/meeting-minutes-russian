@@ -61,6 +61,9 @@ export function AsrServiceSettings() {
     t_one: true,
     gigaam: true,
   });
+  const [diarizationEnabled, setDiarizationEnabled] = useState(false);
+  const [diarizationMode, setDiarizationMode] = useState("energy");
+  const [diarizationToken, setDiarizationToken] = useState("");
   const [liveCaptionsEnabled, setLiveCaptionsEnabled] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
   const [processStatus, setProcessStatus] =
@@ -101,6 +104,20 @@ export function AsrServiceSettings() {
     if (savedLiveCaptions !== null) {
       setLiveCaptionsEnabled(savedLiveCaptions === "true");
     }
+
+    const savedDiarizationEnabled = localStorage.getItem("asrDiarizationEnabled");
+    const savedDiarizationMode = localStorage.getItem("asrDiarizationMode");
+    const savedDiarizationToken = localStorage.getItem("asrDiarizationToken");
+
+    if (savedDiarizationEnabled !== null) {
+      setDiarizationEnabled(savedDiarizationEnabled === "true");
+    }
+    if (savedDiarizationMode !== null) {
+      setDiarizationMode(savedDiarizationMode);
+    }
+    if (savedDiarizationToken !== null) {
+      setDiarizationToken(savedDiarizationToken);
+    }
   }, []);
 
   useEffect(() => {
@@ -117,6 +134,12 @@ export function AsrServiceSettings() {
   }, [liveCaptionsEnabled]);
 
   useEffect(() => {
+    localStorage.setItem("asrDiarizationEnabled", String(diarizationEnabled));
+    localStorage.setItem("asrDiarizationMode", diarizationMode);
+    localStorage.setItem("asrDiarizationToken", diarizationToken);
+  }, [diarizationEnabled, diarizationMode, diarizationToken]);
+
+  useEffect(() => {
     const syncGatewayConfig = async () => {
       const numericPort = parseInt(port || "8765", 10);
       await invoke("set_asr_gateway_config", {
@@ -124,6 +147,9 @@ export function AsrServiceSettings() {
         port: Number.isFinite(numericPort) ? numericPort : 8765,
         tOneEnabled: engines.t_one,
         gigaamEnabled: engines.gigaam,
+        diarizationEnabled: diarizationEnabled,
+        diarizationMode: diarizationMode,
+        diarizationToken: diarizationToken || null,
       });
     };
     syncGatewayConfig().catch((error) => {
@@ -133,7 +159,7 @@ export function AsrServiceSettings() {
           : "Failed to apply ASR gateway configuration",
       );
     });
-  }, [liveCaptionsEnabled, port, engines.t_one, engines.gigaam]);
+  }, [liveCaptionsEnabled, port, engines.t_one, engines.gigaam, diarizationEnabled, diarizationMode, diarizationToken]);
 
   useEffect(() => {
     return () => {
@@ -522,6 +548,49 @@ export function AsrServiceSettings() {
               />
               <span className="text-sm">GigaAM (final segments)</span>
             </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-[200px_1fr] gap-3 items-start">
+          <label className="text-sm font-medium text-gray-700">Speaker Diarization</label>
+          <div className="space-y-3">
+            <div className="flex items-center gap-3">
+              <Switch
+                checked={diarizationEnabled}
+                onCheckedChange={setDiarizationEnabled}
+              />
+              <span className="text-sm">Enable speaker identification</span>
+            </div>
+            {diarizationEnabled && (
+              <>
+                <div className="flex items-center gap-3">
+                  <Select
+                    value={diarizationMode}
+                    onValueChange={setDiarizationMode}
+                  >
+                    <SelectTrigger className="max-w-[200px]">
+                      <SelectValue placeholder="Select mode" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="energy">Energy-based (fast)</SelectItem>
+                      <SelectItem value="pyannote">PyAnnote (accurate)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <span className="text-xs text-gray-500">Mode</span>
+                </div>
+                {diarizationMode === "pyannote" && (
+                  <div className="flex items-center gap-3">
+                    <Input
+                      value={diarizationToken}
+                      onChange={(e) => setDiarizationToken(e.target.value)}
+                      placeholder="HuggingFace token (optional)"
+                      className="max-w-[300px]"
+                    />
+                    <span className="text-xs text-gray-500">Token for PyAnnote</span>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         </div>
 

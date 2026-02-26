@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from ..diarization import Diarizer, build_diarizer
 from ..schemas import FinalSegmentMessage, StartSessionMessage
 from ..vad import VAD
 from .gigaam_pytorch_recognizer import GigaAMPytorchRecognizer
@@ -29,13 +30,18 @@ class _SpeechBuffer:
 class GigaAMEngine:
     name = "gigaam"
 
-    def __init__(self, config: StartSessionMessage) -> None:
+    def __init__(self, config: StartSessionMessage, diarizer: Diarizer | None = None) -> None:
         self._config = config
         self._gigaam_recognizer = GigaAMPytorchRecognizer()
         self._fallback_recognizer = OnnxCtcRecognizer()
         self._vad = VAD(
             mode=config.vad.mode,
             aggressiveness=config.vad.aggressiveness,
+        )
+        self._diarizer: Diarizer = diarizer or build_diarizer(
+            enabled=config.diarization.enabled,
+            mode=config.diarization.mode,
+            huggingface_token=config.diarization.huggingface_token,
         )
         self._target_ms = max(1_000, config.chunking.gigaam_segment_target_s * 1_000)
         self._max_ms = max(
@@ -144,21 +150,26 @@ class GigaAMEngine:
         self._segment_counter += 1
 
         pcm_bytes = bytes(active.pcm)
+
+        # Assign speaker label using diarization pipeline
+        speaker = self._diarizer.assign_speaker(pcm_bytes, self._config.sample_rate)
+
         event = FinalSegmentMessage(
             session_id=session_id,
             engine=self.name,
             segment_id=f"gigaam-seg-{self._segment_counter}",
             time_range_ms=[active.start_ms, segment_end_ms],
-            speaker=None,
+            speaker=speaker,
             text=self._decode_final(pcm_bytes),
             tokens=None,
             confidence=0.85,
         )
         logger.info(
-            "[gigaam][final] segment=%s range=%s..%s chars=%s",
+            "[gigaam][final] segment=%s range=%s..%s speaker=%s chars=%s",
             event.segment_id,
             active.start_ms,
             segment_end_ms,
+            speaker,
             len(event.text),
         )
 

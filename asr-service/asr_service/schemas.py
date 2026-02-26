@@ -13,6 +13,12 @@ class VADConfig(BaseModel):
     aggressiveness: int = 2
 
 
+class DiarizationConfig(BaseModel):
+    enabled: bool = False
+    mode: str = "energy"  # "energy" | "pyannote"
+    huggingface_token: str | None = None
+
+
 class ChunkingConfig(BaseModel):
     live_frame_ms: int = 20
     t_one_emit_ms: int = 200
@@ -28,6 +34,7 @@ class StartSessionMessage(BaseModel):
     channels: int = 1
     engines: list[EngineName] = Field(default_factory=lambda: ["t_one"])
     vad: VADConfig = Field(default_factory=VADConfig)
+    diarization: DiarizationConfig = Field(default_factory=DiarizationConfig)
     chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
 
 

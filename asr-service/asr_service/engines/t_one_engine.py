@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from ..diarization import Diarizer, build_diarizer
 from ..schemas import FinalSegmentMessage, PartialTranscriptMessage, StartSessionMessage
 from ..vad import VAD
 from .onnx_ctc_recognizer import OnnxCtcRecognizer
@@ -27,12 +28,17 @@ class _UtteranceState:
 class TOneEngine:
     name = "t_one"
 
-    def __init__(self, config: StartSessionMessage) -> None:
+    def __init__(self, config: StartSessionMessage, diarizer: Diarizer | None = None) -> None:
         self._config = config
         self._recognizer = OnnxCtcRecognizer()
         self._vad = VAD(
             mode=config.vad.mode,
             aggressiveness=config.vad.aggressiveness,
+        )
+        self._diarizer: Diarizer = diarizer or build_diarizer(
+            enabled=config.diarization.enabled,
+            mode=config.diarization.mode,
+            huggingface_token=config.diarization.huggingface_token,
         )
         self._emit_ms = max(100, config.chunking.t_one_emit_ms)
         self._final_silence_ms = 600
@@ -124,23 +130,28 @@ class TOneEngine:
         assert self._active_utterance is not None
         self._segment_counter += 1
         utt = self._active_utterance
+        pcm_bytes = bytes(utt.pcm)
+
+        # Assign speaker label using diarization pipeline
+        speaker = self._diarizer.assign_speaker(pcm_bytes, self._config.sample_rate)
 
         event = FinalSegmentMessage(
             session_id=session_id,
             engine=self.name,
             segment_id=f"t-one-seg-{self._segment_counter}",
             time_range_ms=[utt.start_ms, utt.last_speech_ms],
-            speaker=None,
-            text=self._decode_final(bytes(utt.pcm)),
+            speaker=speaker,
+            text=self._decode_final(pcm_bytes),
             tokens=None,
             confidence=0.75,
         )
         logger.info(
-            "[t_one][final] backend=%s segment=%s range=%s..%s chars=%s",
+            "[t_one][final] backend=%s segment=%s range=%s..%s speaker=%s chars=%s",
             self._recognizer.backend_name,
             event.segment_id,
             utt.start_ms,
             utt.last_speech_ms,
+            speaker,
             len(event.text),
         )
 

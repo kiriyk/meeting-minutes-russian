@@ -393,6 +393,19 @@ pub fn get_language_preference_internal() -> Option<String> {
     LANGUAGE_PREFERENCE.lock().ok().map(|lang| lang.clone())
 }
 
+// Diarization config stored in Rust (for use in asr_gateway_client)
+static ASR_DIARIZATION_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ASR_DIARIZATION_MODE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0); // 0=energy, 1=pyannote
+static ASR_DIARIZATION_TOKEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn get_asr_diarization_config_internal() -> (bool, String, Option<String>) {
+    let enabled = ASR_DIARIZATION_ENABLED.load(Ordering::SeqCst);
+    let mode_idx = ASR_DIARIZATION_MODE.load(Ordering::SeqCst);
+    let mode = if mode_idx == 1 { "pyannote" } else { "energy" };
+    let token = ASR_DIARIZATION_TOKEN.lock().ok().and_then(|t| t.clone());
+    (enabled, mode.to_string(), token)
+}
+
 #[tauri::command]
 async fn set_asr_gateway_config<R: Runtime>(
     app: AppHandle<R>,
@@ -400,6 +413,9 @@ async fn set_asr_gateway_config<R: Runtime>(
     port: Option<u16>,
     t_one_enabled: Option<bool>,
     gigaam_enabled: Option<bool>,
+    diarization_enabled: Option<bool>,
+    diarization_mode: Option<String>,
+    diarization_token: Option<String>,
 ) -> Result<(), String> {
     ASR_GATEWAY_ENABLED.store(enabled, Ordering::SeqCst);
     if let Some(p) = port {
@@ -410,6 +426,24 @@ async fn set_asr_gateway_config<R: Runtime>(
     }
     if let Some(v) = gigaam_enabled {
         ASR_ENGINE_GIGAAM_ENABLED.store(v, Ordering::SeqCst);
+    }
+    if let Some(v) = diarization_enabled {
+        ASR_DIARIZATION_ENABLED.store(v, Ordering::SeqCst);
+    }
+    if let Some(mode) = diarization_mode {
+        let mode_idx = if mode == "pyannote" { 1 } else { 0 };
+        ASR_DIARIZATION_MODE.store(mode_idx, Ordering::SeqCst);
+    }
+    // Handle token: Some sets, None clears (explicit reset from UI)
+    match diarization_token {
+        Some(token) => {
+            let mut token_lock = ASR_DIARIZATION_TOKEN.lock().map_err(|e| e.to_string())?;
+            *token_lock = Some(token);
+        }
+        None => {
+            let mut token_lock = ASR_DIARIZATION_TOKEN.lock().map_err(|e| e.to_string())?;
+            *token_lock = None;
+        }
     }
 
     let current_port = ASR_GATEWAY_PORT.load(Ordering::SeqCst);

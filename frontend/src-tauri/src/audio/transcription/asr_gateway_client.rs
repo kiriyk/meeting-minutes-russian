@@ -15,6 +15,9 @@ pub struct AsrGatewayClient {
     seq: u64,
     started: bool,
     engines: Vec<String>,
+    diarization_enabled: bool,
+    diarization_mode: String,
+    diarization_token: Option<String>,
 }
 
 impl AsrGatewayClient {
@@ -73,10 +76,13 @@ impl AsrGatewayClient {
             }
         });
 
+        // Get diarization config from global state
+        let (diar_enabled, diar_mode, diar_token) = crate::get_asr_diarization_config_internal();
+
         let session_id = format!("rust-live-{}", uuid::Uuid::new_v4());
         info!(
-            "Connected to ASR gateway on {} with session {}",
-            url, session_id
+            "Connected to ASR gateway on {} with session {} diarization={}/{}",
+            url, session_id, diar_enabled, diar_mode
         );
 
         Some(Self {
@@ -85,6 +91,9 @@ impl AsrGatewayClient {
             seq: 0,
             started: false,
             engines,
+            diarization_enabled: diar_enabled,
+            diarization_mode: diar_mode,
+            diarization_token: diar_token,
         })
     }
 
@@ -101,6 +110,11 @@ impl AsrGatewayClient {
             "channels": 1,
             "engines": self.engines.clone(),
             "vad": { "enabled": true, "mode": "silero", "aggressiveness": 2 },
+            "diarization": {
+                "enabled": self.diarization_enabled,
+                "mode": self.diarization_mode,
+                "huggingface_token": self.diarization_token
+            },
             "chunking": {
                 "live_frame_ms": 20,
                 "t_one_emit_ms": 200,

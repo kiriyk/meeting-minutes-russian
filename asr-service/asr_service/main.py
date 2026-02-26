@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
+from .diarization import Diarizer, build_diarizer
 from .download_manager import DownloadManager
 from .engines.gigaam_engine import GigaAMEngine
 from .engines.t_one_engine import TOneEngine
@@ -41,6 +42,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SessionRuntime:
     config: StartSessionMessage
+    diarizer: Diarizer | None = None
     t_one: TOneEngine | None = None
     gigaam: GigaAMEngine | None = None
 
@@ -178,12 +180,22 @@ def create_app(recordings_dir: Path, models_dir: Path) -> FastAPI:
                             parsed.sample_rate,
                         )
 
-                        runtime = SessionRuntime(config=parsed)
+                        runtime = SessionRuntime(
+                            config=parsed,
+                            diarizer=build_diarizer(
+                                enabled=parsed.diarization.enabled,
+                                mode=parsed.diarization.mode,
+                                huggingface_token=parsed.diarization.huggingface_token,
+                            ),
+                        )
                         if "t_one" in parsed.engines:
-                            runtime.t_one = TOneEngine(parsed)
+                            runtime.t_one = TOneEngine(parsed, diarizer=runtime.diarizer)
                             await runtime.t_one.start()
                         if "gigaam" in parsed.engines:
-                            runtime.gigaam = GigaAMEngine(parsed)
+                            runtime.gigaam = GigaAMEngine(
+                                parsed,
+                                diarizer=runtime.diarizer,
+                            )
                             await runtime.gigaam.start()
                         runtimes[parsed.session_id] = runtime
 

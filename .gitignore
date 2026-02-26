@@ -82,3 +82,7 @@ Cargo.lock
 # ASR service
 asr-service/.venv/
 asr-service/recordings/
+
+# Python cache artifacts
+**/__pycache__/
+*.pyc
