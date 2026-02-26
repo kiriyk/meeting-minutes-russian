@@ -41,6 +41,13 @@ interface JobStatusResponse {
   error?: string | null;
 }
 
+interface AsrGatewayServiceStatus {
+  port: number;
+  managed: boolean;
+  healthy: boolean;
+  mode: "managed_running" | "managed_starting" | "external_running" | "stopped";
+}
+
 type ServiceState = "disconnected" | "connecting" | "connected";
 
 export function AsrServiceSettings() {
@@ -56,6 +63,8 @@ export function AsrServiceSettings() {
   });
   const [liveCaptionsEnabled, setLiveCaptionsEnabled] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
+  const [processStatus, setProcessStatus] =
+    useState<AsrGatewayServiceStatus | null>(null);
 
   const [hfEngine, setHfEngine] = useState<EngineId>("t_one");
   const [hfModelId, setHfModelId] = useState("t-one-base");
@@ -117,8 +126,12 @@ export function AsrServiceSettings() {
         gigaamEnabled: engines.gigaam,
       });
     };
-    syncGatewayConfig().catch(() => {
-      // Ignore sync errors in settings UI
+    syncGatewayConfig().catch((error) => {
+      setLastError(
+        error instanceof Error
+          ? error.message
+          : "Failed to apply ASR gateway configuration",
+      );
     });
   }, [liveCaptionsEnabled, port, engines.t_one, engines.gigaam]);
 
@@ -134,6 +147,41 @@ export function AsrServiceSettings() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | null = null;
+    const numericPort = parseInt(port || "8765", 10);
+    const resolvedPort = Number.isFinite(numericPort) ? numericPort : 8765;
+
+    const poll = async () => {
+      try {
+        const status = (await invoke("get_asr_gateway_service_status", {
+          port: resolvedPort,
+        })) as AsrGatewayServiceStatus;
+        if (!cancelled) {
+          setProcessStatus(status);
+        }
+      } catch {
+        if (!cancelled) {
+          setProcessStatus(null);
+        }
+      } finally {
+        if (!cancelled) {
+          timer = window.setTimeout(poll, 2000);
+        }
+      }
+    };
+
+    void poll();
+
+    return () => {
+      cancelled = true;
+      if (timer) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [port, liveCaptionsEnabled]);
 
   const checkHealth = async () => {
     setLastError(null);
@@ -402,6 +450,30 @@ export function AsrServiceSettings() {
             <Button variant="outline" onClick={loadLocalModels}>
               Load Local Models
             </Button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-[200px_1fr] gap-3 items-center">
+          <label className="text-sm font-medium text-gray-700">ASR Process</label>
+          <div className="flex items-center gap-3 text-sm">
+            <span className="font-medium text-gray-800">
+              {processStatus
+                ? processStatus.mode === "managed_running"
+                  ? "managed"
+                  : processStatus.mode === "managed_starting"
+                    ? "starting"
+                    : processStatus.mode === "external_running"
+                      ? "external"
+                      : "stopped"
+                : "unknown"}
+            </span>
+            <span className="text-xs text-gray-500">
+              health:{" "}
+              {processStatus ? (processStatus.healthy ? "ok" : "failed") : "unknown"}
+            </span>
+            <span className="text-xs text-gray-500">
+              port: {processStatus?.port ?? port ?? "8765"}
+            </span>
           </div>
         </div>
 

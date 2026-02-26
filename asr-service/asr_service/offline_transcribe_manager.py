@@ -37,17 +37,27 @@ class OfflineJob:
     file_path: str
     segment_seconds: int
     progress: float = 0.0
+    queue_position: int | None = None
     result: dict | None = None
     error: str | None = None
 
 
 class OfflineTranscribeManager:
-    def __init__(self) -> None:
+    def __init__(self, max_concurrent_jobs: int | None = None) -> None:
         self._jobs: dict[str, OfflineJob] = {}
         self._lock = asyncio.Lock()
-        self._t_one = OnnxCtcRecognizer()
-        self._gigaam_pt = GigaAMPytorchRecognizer()
-        self._gigaam_onnx = OnnxCtcRecognizer()
+        self._recognizer_init_lock = asyncio.Lock()
+        self._t_one: OnnxCtcRecognizer | None = None
+        self._gigaam_pt: GigaAMPytorchRecognizer | None = None
+        self._gigaam_onnx: OnnxCtcRecognizer | None = None
+
+        env_limit = os.getenv("MEETILY_OFFLINE_MAX_CONCURRENT", "1")
+        try:
+            resolved_limit = int(max_concurrent_jobs or env_limit)
+        except (TypeError, ValueError):
+            resolved_limit = 1
+        self._max_concurrent_jobs = max(1, resolved_limit)
+        self._job_semaphore = asyncio.Semaphore(self._max_concurrent_jobs)
 
     async def start_job(
         self,
@@ -72,6 +82,7 @@ class OfflineTranscribeManager:
 
         async with self._lock:
             self._jobs[job.job_id] = job
+            self._recompute_queue_positions_locked()
 
         asyncio.create_task(self._worker(job.job_id))
         return job
@@ -81,109 +92,121 @@ class OfflineTranscribeManager:
             return self._jobs.get(job_id)
 
     async def _worker(self, job_id: str) -> None:
-        async with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                return
-            job.status = "running"
+        async with self._job_semaphore:
+            async with self._lock:
+                job = self._jobs.get(job_id)
+                if job is None:
+                    return
+                job.status = "running"
+                job.queue_position = None
+                self._recompute_queue_positions_locked()
 
-        cleanup_tmp = False
-        wav_path: Path | None = None
-        try:
-            source_path = Path(job.file_path)
-            wav_path, cleanup_tmp = self._ensure_mono_16k_wav(source_path)
-            logger.info(
-                "offline job=%s engine=%s source=%s wav=%s",
-                job.job_id,
-                job.engine,
-                source_path,
-                wav_path,
-            )
-            with wave.open(str(wav_path), "rb") as wav_reader:
-                channels = wav_reader.getnchannels()
-                sample_rate = wav_reader.getframerate()
-                sample_width = wav_reader.getsampwidth()
-                frame_count = wav_reader.getnframes()
+            cleanup_tmp = False
+            wav_path: Path | None = None
+            try:
+                source_path = Path(job.file_path)
+                wav_path, cleanup_tmp = await asyncio.to_thread(
+                    self._ensure_mono_16k_wav, source_path
+                )
+                await self._ensure_recognizer_ready(job.engine)
+                logger.info(
+                    "offline job=%s engine=%s source=%s wav=%s",
+                    job.job_id,
+                    job.engine,
+                    source_path,
+                    wav_path,
+                )
+                with wave.open(str(wav_path), "rb") as wav_reader:
+                    channels = wav_reader.getnchannels()
+                    sample_rate = wav_reader.getframerate()
+                    sample_width = wav_reader.getsampwidth()
+                    frame_count = wav_reader.getnframes()
 
-            if channels != 1:
-                raise ValueError("MVP offline transcribe expects mono WAV")
-            if sample_width != 2:
-                raise ValueError("MVP offline transcribe expects 16-bit WAV")
+                if channels != 1:
+                    raise ValueError("MVP offline transcribe expects mono WAV")
+                if sample_width != 2:
+                    raise ValueError("MVP offline transcribe expects 16-bit WAV")
 
-            total_duration_s = frame_count / float(sample_rate)
-            if total_duration_s <= 0:
-                await self._set_done(job_id, [])
-                return
+                total_duration_s = frame_count / float(sample_rate)
+                if total_duration_s <= 0:
+                    await self._set_done(job_id, [])
+                    return
 
-            seg_s = max(1, int(job.segment_seconds))
-            num_segments = max(1, int((total_duration_s + seg_s - 1) // seg_s))
-            segments: list[OfflineSegment] = []
+                seg_s = max(1, int(job.segment_seconds))
+                num_segments = max(1, int((total_duration_s + seg_s - 1) // seg_s))
+                segments: list[OfflineSegment] = []
 
-            bytes_per_sample = 2
-            with wave.open(str(wav_path), "rb") as wav_reader:
-                for idx in range(num_segments):
-                    start_s = idx * seg_s
-                    end_s = min(total_duration_s, (idx + 1) * seg_s)
-                    start_ms = int(start_s * 1000)
-                    end_ms = int(end_s * 1000)
-                    dur_s = max(0.0, end_s - start_s)
+                bytes_per_sample = 2
+                with wave.open(str(wav_path), "rb") as wav_reader:
+                    for idx in range(num_segments):
+                        start_s = idx * seg_s
+                        end_s = min(total_duration_s, (idx + 1) * seg_s)
+                        start_ms = int(start_s * 1000)
+                        end_ms = int(end_s * 1000)
+                        dur_s = max(0.0, end_s - start_s)
 
-                    start_frame = int(start_s * sample_rate)
-                    frames_to_read = max(1, int((end_s - start_s) * sample_rate))
-                    wav_reader.setpos(start_frame)
-                    pcm = wav_reader.readframes(frames_to_read)
+                        start_frame = int(start_s * sample_rate)
+                        frames_to_read = max(1, int((end_s - start_s) * sample_rate))
+                        wav_reader.setpos(start_frame)
+                        pcm = wav_reader.readframes(frames_to_read)
 
-                    text = self._decode_segment(
-                        engine=job.engine, pcm=pcm, sample_rate=sample_rate
-                    )
-                    if not text:
-                        text = f"[offline-{job.engine}] speech segment {dur_s:.1f}s"
-
-                    segments.append(
-                        OfflineSegment(
+                        text = await asyncio.to_thread(
+                            self._decode_segment,
                             engine=job.engine,
-                            segment_id=f"offline-seg-{idx + 1}",
-                            time_range_ms=[start_ms, end_ms],
-                            text=text,
-                            confidence=0.9 if job.engine == "gigaam" else 0.8,
+                            pcm=pcm,
+                            sample_rate=sample_rate,
                         )
-                    )
+                        if not text:
+                            text = f"[offline-{job.engine}] speech segment {dur_s:.1f}s"
 
-                    progress = ((idx + 1) / num_segments) * 100.0
-                    await self._set_progress(job_id, progress)
+                        segments.append(
+                            OfflineSegment(
+                                engine=job.engine,
+                                segment_id=f"offline-seg-{idx + 1}",
+                                time_range_ms=[start_ms, end_ms],
+                                text=text,
+                                confidence=0.9 if job.engine == "gigaam" else 0.8,
+                            )
+                        )
 
-            await self._set_done(job_id, segments)
-        except Exception as exc:
-            await self._set_failed(job_id, str(exc))
-        finally:
-            if cleanup_tmp and wav_path is not None:
-                try:
-                    wav_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                        progress = ((idx + 1) / num_segments) * 100.0
+                        await self._set_progress(job_id, progress)
+
+                await self._set_done(job_id, segments)
+            except Exception as exc:
+                await self._set_failed(job_id, str(exc))
+            finally:
+                if cleanup_tmp and wav_path is not None:
+                    try:
+                        wav_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
 
     def _decode_segment(self, *, engine: str, pcm: bytes, sample_rate: int) -> str:
         if engine == "t_one":
-            text = self._t_one.transcribe_pcm_s16le(pcm, sample_rate)
+            t_one = self._get_t_one_recognizer()
+            text = t_one.transcribe_pcm_s16le(pcm, sample_rate)
             logger.info(
                 "offline decode engine=t_one backend=%s ok=%s",
-                self._t_one.backend_name,
+                t_one.backend_name,
                 text is not None,
             )
             return (text or "").strip() if text is not None else ""
 
         if engine == "gigaam":
-            text = self._gigaam_pt.transcribe_pcm_s16le(pcm, sample_rate)
+            gigaam_pt = self._get_gigaam_pytorch_recognizer()
+            text = gigaam_pt.transcribe_pcm_s16le(pcm, sample_rate)
             if text is not None:
                 logger.info(
                     "offline decode engine=gigaam backend=%s ok=true",
-                    self._gigaam_pt.backend_name,
+                    gigaam_pt.backend_name,
                 )
                 return text.strip()
-            text = self._gigaam_onnx.transcribe_pcm_s16le(pcm, sample_rate)
+            gigaam_onnx = self._get_gigaam_onnx_recognizer()
+            text = gigaam_onnx.transcribe_pcm_s16le(pcm, sample_rate)
             logger.info(
                 "offline decode engine=gigaam backend=%s ok=%s",
-                self._gigaam_onnx.backend_name,
+                gigaam_onnx.backend_name,
                 text is not None,
             )
             return (text or "").strip() if text is not None else ""
@@ -312,6 +335,7 @@ class OfflineTranscribeManager:
                 "segments": result_segments,
                 "text": merged_text,
             }
+            self._recompute_queue_positions_locked()
 
     async def _set_failed(self, job_id: str, error: str) -> None:
         async with self._lock:
@@ -320,6 +344,42 @@ class OfflineTranscribeManager:
                 return
             job.status = "failed"
             job.error = error
+            self._recompute_queue_positions_locked()
+
+    def _recompute_queue_positions_locked(self) -> None:
+        queue_pos = 1
+        for job in self._jobs.values():
+            if job.status == "queued":
+                job.queue_position = queue_pos
+                queue_pos += 1
+            else:
+                job.queue_position = None
+
+    def _get_t_one_recognizer(self) -> OnnxCtcRecognizer:
+        if self._t_one is None:
+            self._t_one = OnnxCtcRecognizer()
+        return self._t_one
+
+    def _get_gigaam_pytorch_recognizer(self) -> GigaAMPytorchRecognizer:
+        if self._gigaam_pt is None:
+            self._gigaam_pt = GigaAMPytorchRecognizer()
+        return self._gigaam_pt
+
+    def _get_gigaam_onnx_recognizer(self) -> OnnxCtcRecognizer:
+        if self._gigaam_onnx is None:
+            self._gigaam_onnx = OnnxCtcRecognizer()
+        return self._gigaam_onnx
+
+    async def _ensure_recognizer_ready(self, engine: str) -> None:
+        async with self._recognizer_init_lock:
+            if engine == "t_one" and self._t_one is None:
+                self._t_one = await asyncio.to_thread(OnnxCtcRecognizer)
+                return
+            if engine == "gigaam":
+                if self._gigaam_pt is None:
+                    self._gigaam_pt = await asyncio.to_thread(GigaAMPytorchRecognizer)
+                if self._gigaam_onnx is None:
+                    self._gigaam_onnx = await asyncio.to_thread(OnnxCtcRecognizer)
 
     @staticmethod
     def job_to_dict(job: OfflineJob) -> dict:

@@ -38,6 +38,7 @@ pub(crate) use perf_trace;
 pub mod analytics;
 pub mod anthropic;
 pub mod api;
+pub mod asr_gateway_service;
 pub mod audio;
 pub mod console_utils;
 pub mod database;
@@ -55,6 +56,7 @@ pub mod utils;
 pub mod whisper_engine;
 
 use audio::{list_audio_devices, trigger_audio_permission, AudioDevice};
+use asr_gateway_service::AsrGatewayServiceManager;
 use log::{error as log_error, info as log_info};
 use notifications::commands::NotificationManagerState;
 use std::sync::Arc;
@@ -392,7 +394,8 @@ pub fn get_language_preference_internal() -> Option<String> {
 }
 
 #[tauri::command]
-async fn set_asr_gateway_config(
+async fn set_asr_gateway_config<R: Runtime>(
+    app: AppHandle<R>,
     enabled: bool,
     port: Option<u16>,
     t_one_enabled: Option<bool>,
@@ -408,6 +411,21 @@ async fn set_asr_gateway_config(
     if let Some(v) = gigaam_enabled {
         ASR_ENGINE_GIGAAM_ENABLED.store(v, Ordering::SeqCst);
     }
+
+    let current_port = ASR_GATEWAY_PORT.load(Ordering::SeqCst);
+    let manager = app.state::<AsrGatewayServiceManager>().inner().clone();
+    if enabled {
+        manager
+            .ensure_running(current_port)
+            .await
+            .map_err(|e| format!("Failed to start ASR service: {}", e))?;
+    } else {
+        manager
+            .stop_managed()
+            .await
+            .map_err(|e| format!("Failed to stop ASR service: {}", e))?;
+    }
+
     Ok(())
 }
 
@@ -419,6 +437,16 @@ async fn get_asr_gateway_config() -> Result<(bool, u16, bool, bool), String> {
         ASR_ENGINE_T_ONE_ENABLED.load(Ordering::SeqCst),
         ASR_ENGINE_GIGAAM_ENABLED.load(Ordering::SeqCst),
     ))
+}
+
+#[tauri::command]
+async fn get_asr_gateway_service_status<R: Runtime>(
+    app: AppHandle<R>,
+    port: Option<u16>,
+) -> Result<asr_gateway_service::AsrGatewayServiceStatus, String> {
+    let current_port = port.unwrap_or_else(|| ASR_GATEWAY_PORT.load(Ordering::SeqCst));
+    let manager = app.state::<AsrGatewayServiceManager>().inner().clone();
+    Ok(manager.status(current_port).await)
 }
 
 pub fn get_asr_gateway_config_internal() -> (bool, u16, bool, bool) {
@@ -440,6 +468,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(whisper_engine::parallel_commands::ParallelProcessorState::new())
+        .manage(AsrGatewayServiceManager::new())
         .manage(Arc::new(RwLock::new(
             None::<notifications::manager::NotificationManager<tauri::Wry>>,
         )) as NotificationManagerState<tauri::Wry>)
@@ -721,6 +750,7 @@ pub fn run() {
             set_language_preference,
             set_asr_gateway_config,
             get_asr_gateway_config,
+            get_asr_gateway_service_status,
             // Notification system commands
             notifications::commands::get_notification_settings,
             notifications::commands::set_notification_settings,
@@ -792,6 +822,12 @@ pub fn run() {
                     log::info!("Cleaning up sidecar...");
                     if let Err(e) = summary::summary_engine::force_shutdown_sidecar().await {
                         log::error!("Failed to force shutdown sidecar: {}", e);
+                    }
+
+                    if let Some(asr_manager) =
+                        _app_handle.try_state::<AsrGatewayServiceManager>()
+                    {
+                        asr_manager.shutdown_for_exit().await;
                     }
                 });
                 log::info!("Application cleanup complete");

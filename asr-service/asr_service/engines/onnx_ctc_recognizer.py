@@ -135,12 +135,14 @@ class OnnxCtcRecognizer:
             import onnxruntime as ort  # type: ignore
         except Exception as exc:
             self._error = f"onnxruntime import failed: {exc}"
+            logger.warning("%s", self._error)
             return
         self._ort = ort
 
         model_path = self._resolve_model_path()
         if model_path is None:
             self._error = "T-One model.onnx not found"
+            logger.warning("%s", self._error)
             return
 
         model_dir = model_path.parent
@@ -148,6 +150,7 @@ class OnnxCtcRecognizer:
         config_path = model_dir / "config.json"
         if not vocab_path.exists():
             self._error = f"vocab.json not found near model: {vocab_path}"
+            logger.warning("%s", self._error)
             return
 
         try:
@@ -155,6 +158,7 @@ class OnnxCtcRecognizer:
             self._id_to_token = {int(v): str(k) for k, v in vocab_obj.items()}
         except Exception as exc:
             self._error = f"failed to parse vocab.json: {exc}"
+            logger.warning("%s", self._error)
             return
 
         if config_path.exists():
@@ -179,11 +183,23 @@ class OnnxCtcRecognizer:
                 "yes",
             )
             self._prefer_coreml = use_coreml
+            logger.info(
+                "T-One ONNX init: model=%s use_coreml=%s available_providers=%s tmpdir=%s",
+                model_path,
+                use_coreml,
+                providers,
+                os.getenv("TMPDIR"),
+            )
             if use_coreml:
                 preferred_order = ("CoreMLExecutionProvider", "CPUExecutionProvider")
             else:
                 preferred_order = ("CPUExecutionProvider", "CoreMLExecutionProvider")
+            if use_coreml and "CoreMLExecutionProvider" not in providers:
+                logger.warning(
+                    "MEETILY_ASR_USE_COREML is enabled but CoreMLExecutionProvider is not available"
+                )
             preferred = [p for p in preferred_order if p in providers]
+            logger.info("T-One ONNX provider preference order=%s", preferred)
             self._session = ort.InferenceSession(
                 str(model_path),
                 sess_options=session_opts,
@@ -231,6 +247,11 @@ class OnnxCtcRecognizer:
             session_providers = self._session.get_providers()
             self._active_provider = (
                 session_providers[0] if len(session_providers) > 0 else None
+            )
+            logger.info(
+                "T-One ONNX rebuilt CPU session: model=%s backend=%s",
+                self._model_path,
+                self.backend_name,
             )
             return self._bind_io_names()
         except Exception as exc:
@@ -291,6 +312,15 @@ class OnnxCtcRecognizer:
         self._state_input_name = state_in.name
         self._logprobs_output_name = logprobs_out.name
         self._state_next_output_name = state_next_out.name
+        logger.info(
+            "T-One ONNX bound IO: signal=%s state=%s logprobs=%s state_next=%s signal_len=%s state_size=%s",
+            self._signal_input_name,
+            self._state_input_name,
+            self._logprobs_output_name,
+            self._state_next_output_name,
+            self._signal_len,
+            self._state_size,
+        )
         return True
 
     def _resolve_model_path(self) -> Path | None:

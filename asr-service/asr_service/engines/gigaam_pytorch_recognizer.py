@@ -89,11 +89,13 @@ class GigaAMPytorchRecognizer:
             from transformers import AutoModel  # type: ignore
         except Exception as exc:
             self._error = f"gigaam dependencies missing: {exc}"
+            logger.warning("%s", self._error)
             return
 
         model_dir = self._resolve_model_dir()
         if model_dir is None:
             self._error = "GigaAM model directory not found"
+            logger.warning("%s", self._error)
             return
 
         try:

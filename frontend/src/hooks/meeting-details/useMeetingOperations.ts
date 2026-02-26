@@ -10,11 +10,25 @@ interface UseMeetingOperationsProps {
   onMeetingUpdated?: () => Promise<void>;
 }
 
+interface OfflineJobStatus {
+  job_id: string;
+  status: "queued" | "running" | "completed" | "failed";
+  progress?: number;
+  queue_position?: number | null;
+  error?: string | null;
+  result?: {
+    segments?: any[];
+  } | null;
+}
+
 export function useMeetingOperations({
   meeting,
   onMeetingUpdated,
 }: UseMeetingOperationsProps) {
   const [isRetranscribing, setIsRetranscribing] = useState(false);
+  const [activeOfflineJobId, setActiveOfflineJobId] = useState<string | null>(
+    null,
+  );
   const [selectedOfflineEngine, setSelectedOfflineEngine] =
     useState<OfflineAsrEngine>("gigaam");
 
@@ -35,51 +49,62 @@ export function useMeetingOperations({
 
     try {
       setIsRetranscribing(true);
-      toast.info("Starting GigaAM re-transcription...");
-      const filePath = await invokeTauri<string>(
-        "api_find_meeting_audio_file",
-        {
-          meetingId: meeting.id,
-        },
-      );
-
       const port = parseInt(
         localStorage.getItem("asrServicePort") || "8765",
         10,
       );
       const baseUrl = `http://127.0.0.1:${Number.isFinite(port) ? port : 8765}`;
-
-      const startResp = await fetch(`${baseUrl}/offline_transcribe`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          file_path: filePath,
-          engine: selectedOfflineEngine,
-          segment_seconds: 20,
-        }),
-      });
-
-      if (!startResp.ok) {
-        const errText = await startResp.text();
-        throw new Error(
-          `offline_transcribe failed: ${startResp.status} ${errText}`,
+      let jobId = activeOfflineJobId;
+      if (jobId) {
+        toast.info(`Resuming offline job: ${jobId.slice(0, 8)}...`);
+      } else {
+        toast.info(
+          `Starting ${selectedOfflineEngine === "gigaam" ? "GigaAM" : "T-One"} re-transcription...`,
         );
-      }
+        const filePath = await invokeTauri<string>(
+          "api_find_meeting_audio_file",
+          {
+            meetingId: meeting.id,
+          },
+        );
 
-      const { job_id } = (await startResp.json()) as { job_id: string };
-      if (!job_id) {
-        throw new Error("Offline job id is missing");
+        const startResp = await fetch(`${baseUrl}/offline_transcribe`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            file_path: filePath,
+            engine: selectedOfflineEngine,
+            segment_seconds: 20,
+          }),
+        });
+
+        if (!startResp.ok) {
+          const errText = await startResp.text();
+          throw new Error(
+            `offline_transcribe failed: ${startResp.status} ${errText}`,
+          );
+        }
+
+        const { job_id } = (await startResp.json()) as { job_id: string };
+        if (!job_id) {
+          throw new Error("Offline job id is missing");
+        }
+        jobId = job_id;
+        setActiveOfflineJobId(jobId);
       }
 
       const startedAt = Date.now();
-      const timeoutMs = 20 * 60 * 1000;
+      let shownQueuePosition: number | null = null;
+      let progressMark = -1;
+      let warnedLongRunning = false;
 
       while (true) {
-        if (Date.now() - startedAt > timeoutMs) {
-          throw new Error("Offline transcription timed out");
+        if (!warnedLongRunning && Date.now() - startedAt > 30 * 60 * 1000) {
+          warnedLongRunning = true;
+          toast.info("Offline transcription is still running in background...");
         }
 
-        const statusResp = await fetch(`${baseUrl}/jobs/${job_id}`);
+        const statusResp = await fetch(`${baseUrl}/jobs/${jobId}`);
         if (!statusResp.ok) {
           const errText = await statusResp.text();
           throw new Error(
@@ -87,16 +112,36 @@ export function useMeetingOperations({
           );
         }
 
-        const job = (await statusResp.json()) as any;
+        const job = (await statusResp.json()) as OfflineJobStatus;
+        if (
+          job.status === "queued" &&
+          typeof job.queue_position === "number" &&
+          shownQueuePosition !== job.queue_position
+        ) {
+          shownQueuePosition = job.queue_position;
+          toast.info(`Re-ASR queued. Position: ${job.queue_position}`);
+        }
+        if (typeof job.progress === "number") {
+          const rounded = Math.floor(job.progress);
+          const mark = Math.floor(rounded / 10);
+          if (mark > progressMark && mark >= 1 && rounded < 100) {
+            progressMark = mark;
+            toast.info(`Re-ASR progress: ${rounded}%`);
+          }
+        }
+
         if (job.status === "failed") {
+          setActiveOfflineJobId(null);
           throw new Error(job.error || "Offline transcription failed");
         }
         if (job.status === "completed") {
+          setActiveOfflineJobId(null);
           const segments = (job.result?.segments ?? []) as any[];
           if (segments.length === 0) {
-            throw new Error(
-              "Offline transcription completed but returned no segments",
+            toast.info(
+              "Offline transcription completed: no speech segments detected. Existing transcript left unchanged.",
             );
+            return;
           }
           const transcripts: Transcript[] = segments.map(
             (seg: any, index: number) => {
@@ -111,7 +156,7 @@ export function useMeetingOperations({
               const mins = Math.floor(startSec / 60);
               const secs = Math.floor(startSec % 60);
               return {
-                id: `${meeting.id}-gigaam-${index + 1}`,
+                id: `${meeting.id}-${selectedOfflineEngine}-${index + 1}`,
                 text: String(seg.text ?? "").trim(),
                 timestamp: `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`,
                 audio_start_time: startSec,
@@ -139,7 +184,7 @@ export function useMeetingOperations({
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
     } catch (error) {
-      console.error("Failed to re-transcribe meeting with GigaAM:", error);
+      console.error("Failed to re-transcribe meeting with selected engine:", error);
       toast.error(
         error instanceof Error
           ? error.message
@@ -148,7 +193,13 @@ export function useMeetingOperations({
     } finally {
       setIsRetranscribing(false);
     }
-  }, [isRetranscribing, meeting.id, onMeetingUpdated, selectedOfflineEngine]);
+  }, [
+    activeOfflineJobId,
+    isRetranscribing,
+    meeting.id,
+    onMeetingUpdated,
+    selectedOfflineEngine,
+  ]);
 
   return {
     handleOpenMeetingFolder,
