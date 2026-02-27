@@ -67,6 +67,7 @@ class StatusMessage(BaseModel):
     type: Literal["status"] = "status"
     session_id: str
     engines: dict[str, EngineStatus]
+    runtime: RuntimeStatusResponse | None = None
 
 
 class PartialTranscriptMessage(BaseModel):
@@ -102,10 +103,20 @@ class DownloadModelRequest(BaseModel):
     repo_id: str
     filename: str
     revision: str = "main"
+    hf_token: str | None = None
 
 
 class DownloadModelResponse(BaseModel):
     job_id: str
+
+
+class DownloadPresetRequest(BaseModel):
+    preset_id: Literal["t_one", "gigaam_v3", "pyannote_diarization"]
+    hf_token: str | None = None
+
+
+class DownloadBatchModelResponse(BaseModel):
+    job_ids: list[str]
 
 
 class JobStatusResponse(BaseModel):
@@ -125,6 +136,25 @@ class JobStatusResponse(BaseModel):
 
 class LocalModelsResponse(BaseModel):
     models: list[dict[str, str]]
+
+
+class RuntimeComponentStatus(BaseModel):
+    mode: str
+    backend: str
+    acceleration: str
+
+
+class RuntimeEngineStatus(BaseModel):
+    enabled: bool
+    backend: str
+    acceleration: str
+
+
+class RuntimeStatusResponse(BaseModel):
+    session_id: str
+    asr: dict[str, RuntimeEngineStatus]
+    vad: RuntimeComponentStatus
+    diarization: RuntimeComponentStatus
 
 
 class OfflineTranscribeRequest(BaseModel):

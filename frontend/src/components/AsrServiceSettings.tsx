@@ -41,6 +41,13 @@ interface JobStatusResponse {
   error?: string | null;
 }
 
+interface RuntimeStatusResponse {
+  session_id: string;
+  asr: Record<string, { enabled: boolean; backend: string; acceleration: string }>;
+  vad: { mode: string; backend: string; acceleration: string };
+  diarization: { mode: string; backend: string; acceleration: string };
+}
+
 interface AsrGatewayServiceStatus {
   port: number;
   managed: boolean;
@@ -77,6 +84,9 @@ export function AsrServiceSettings() {
   const [activeJobs, setActiveJobs] = useState<
     Record<string, JobStatusResponse>
   >({});
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatusResponse | null>(
+    null,
+  );
 
   const wsRef = useRef<WebSocket | null>(null);
   const pollRef = useRef<number | null>(null);
@@ -366,6 +376,71 @@ export function AsrServiceSettings() {
     }
   };
 
+  const startPresetDownload = async (
+    presetId: "t_one" | "gigaam_v3" | "pyannote_diarization",
+  ) => {
+    setLastError(null);
+    try {
+      const response = await fetch(`${baseHttpUrl}/models/download_preset`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          preset_id: presetId,
+          hf_token: diarizationToken.trim() || null,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Preset download request failed with status ${response.status}`);
+      }
+
+      const data = (await response.json()) as { job_ids: string[] };
+      const engine =
+        presetId === "t_one"
+          ? "t_one"
+          : presetId === "gigaam_v3"
+            ? "gigaam"
+            : "diarization";
+      const modelId =
+        presetId === "t_one"
+          ? "t-one"
+          : presetId === "gigaam_v3"
+            ? "GigaAM-v3"
+            : "speaker-diarization-3.1";
+      const repoId =
+        presetId === "t_one"
+          ? "t-tech/T-one"
+          : presetId === "gigaam_v3"
+            ? "ai-sage/GigaAM-v3"
+            : "pyannote/speaker-diarization-3.1";
+
+      setActiveJobs((prev) => {
+        const next = { ...prev };
+        for (const jobId of data.job_ids || []) {
+          next[jobId] = {
+            job_id: jobId,
+            status: "queued",
+            model_id: modelId,
+            engine,
+            repo_id: repoId,
+            filename: "(preset file)",
+            revision: "main",
+            target_path: "",
+            progress: 0,
+            error: null,
+          };
+        }
+        return next;
+      });
+    } catch (error) {
+      setLastError(
+        error instanceof Error
+          ? error.message
+          : "Failed to start preset Hugging Face download",
+      );
+    }
+  };
+
   const connect = async () => {
     setLastError(null);
     setServiceState("connecting");
@@ -383,9 +458,15 @@ export function AsrServiceSettings() {
           const parsed = JSON.parse(event.data) as {
             type?: string;
             message?: string;
+            runtime?: RuntimeStatusResponse;
           };
           if (parsed.type === "error") {
             setLastError(parsed.message || "ASR service returned an error");
+          }
+          if (parsed.type === "status" && parsed.runtime) {
+            setRuntimeStatus(parsed.runtime);
+            localStorage.setItem("asrRuntimeStatus", JSON.stringify(parsed.runtime));
+            window.dispatchEvent(new Event("asr-runtime-status-updated"));
           }
         } catch {
           // Ignore non-JSON messages
@@ -683,6 +764,51 @@ export function AsrServiceSettings() {
 
         <div className="flex items-center gap-3">
           <Button onClick={startHfDownload}>Download from Hugging Face</Button>
+          <Button variant="secondary" onClick={() => startPresetDownload("t_one")}>
+            Скачать T-one
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => startPresetDownload("gigaam_v3")}
+          >
+            Скачать GigaAM-v3
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => startPresetDownload("pyannote_diarization")}
+          >
+            Скачать PyAnnote
+          </Button>
+        </div>
+
+        <div className="p-3 border rounded-md bg-gray-50 text-xs space-y-1">
+          <div className="text-sm font-medium">Runtime Status (ASR/VAD/Diarization)</div>
+          {runtimeStatus ? (
+            <>
+              <div>
+                asr.t_one: {runtimeStatus.asr.t_one?.enabled ? "on" : "off"} |
+                backend: {runtimeStatus.asr.t_one?.backend || "n/a"} |
+                accel: {runtimeStatus.asr.t_one?.acceleration || "n/a"}
+              </div>
+              <div>
+                asr.gigaam: {runtimeStatus.asr.gigaam?.enabled ? "on" : "off"} |
+                backend: {runtimeStatus.asr.gigaam?.backend || "n/a"} |
+                accel: {runtimeStatus.asr.gigaam?.acceleration || "n/a"}
+              </div>
+              <div>
+                vad: mode={runtimeStatus.vad.mode} |
+                backend={runtimeStatus.vad.backend} |
+                accel={runtimeStatus.vad.acceleration}
+              </div>
+              <div>
+                diarization: mode={runtimeStatus.diarization.mode} |
+                backend={runtimeStatus.diarization.backend} |
+                accel={runtimeStatus.diarization.acceleration}
+              </div>
+            </>
+          ) : (
+            <div className="text-gray-500">No active runtime status yet</div>
+          )}
         </div>
 
         {Object.keys(activeJobs).length > 0 && (

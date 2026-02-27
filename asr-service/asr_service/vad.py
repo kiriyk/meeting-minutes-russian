@@ -27,3 +27,11 @@ class VAD:
             return False
         rms = audioop.rms(pcm_frame, 2)
         return rms >= self.threshold
+
+    def runtime_status(self) -> dict[str, str]:
+        # Current MVP implementation uses RMS energy thresholding.
+        return {
+            "mode": self.mode,
+            "backend": "energy-rms",
+            "acceleration": "cpu",
+        }

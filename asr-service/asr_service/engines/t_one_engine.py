@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Literal
 
 from ..diarization import Diarizer, build_diarizer
 from ..schemas import FinalSegmentMessage, PartialTranscriptMessage, StartSessionMessage
@@ -26,7 +27,7 @@ class _UtteranceState:
 
 
 class TOneEngine:
-    name = "t_one"
+    name: Literal["t_one"] = "t_one"
 
     def __init__(self, config: StartSessionMessage, diarizer: Diarizer | None = None) -> None:
         self._config = config
@@ -63,6 +64,20 @@ class TOneEngine:
 
     async def stop(self) -> None:
         return None
+
+    def runtime_status(self) -> dict[str, str]:
+        backend = self._recognizer.backend_name
+        lowered = backend.lower()
+        acceleration = "cpu"
+        if "cuda" in lowered or "coreml" in lowered or "mps" in lowered:
+            acceleration = "gpu"
+        return {
+            "backend": backend,
+            "acceleration": acceleration,
+        }
+
+    def vad_runtime_status(self) -> dict[str, str]:
+        return self._vad.runtime_status()
 
     def process_chunk(
         self,

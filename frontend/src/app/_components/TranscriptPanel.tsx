@@ -10,6 +10,7 @@ import { usePermissionCheck } from '@/hooks/usePermissionCheck';
 import { ModalType } from '@/hooks/useModalState';
 import { useIsLinux } from '@/hooks/usePlatform';
 import { useMemo } from 'react';
+import { useEffect, useState } from 'react';
 
 /**
  * TranscriptPanel Component
@@ -36,6 +37,47 @@ export function TranscriptPanel({
   const { isRecording, isPaused } = useRecordingState();
   const { checkPermissions, isChecking, hasSystemAudio, hasMicrophone } = usePermissionCheck();
   const isLinux = useIsLinux();
+  const [runtimeSummary, setRuntimeSummary] = useState<string>('ASR: n/a | VAD: n/a | Diar: n/a');
+
+  useEffect(() => {
+    const updateRuntimeSummary = () => {
+      try {
+        const raw = localStorage.getItem('asrRuntimeStatus');
+        if (!raw) {
+          setRuntimeSummary('ASR: n/a | VAD: n/a | Diar: n/a');
+          return;
+        }
+        const runtime = JSON.parse(raw) as {
+          asr?: Record<string, { enabled: boolean; acceleration: string }>;
+          vad?: { mode: string; acceleration: string };
+          diarization?: { mode: string; acceleration: string };
+        };
+
+        const asrEnabled = Object.entries(runtime.asr || {})
+          .filter(([, v]) => v.enabled)
+          .map(([k, v]) => `${k}:${v.acceleration}`)
+          .join(', ');
+        const vad = runtime.vad
+          ? `${runtime.vad.mode}:${runtime.vad.acceleration}`
+          : 'n/a';
+        const diar = runtime.diarization
+          ? `${runtime.diarization.mode}:${runtime.diarization.acceleration}`
+          : 'n/a';
+
+        setRuntimeSummary(
+          `ASR: ${asrEnabled || 'n/a'} | VAD: ${vad} | Diar: ${diar}`,
+        );
+      } catch {
+        setRuntimeSummary('ASR: n/a | VAD: n/a | Diar: n/a');
+      }
+    };
+
+    updateRuntimeSummary();
+    window.addEventListener('asr-runtime-status-updated', updateRuntimeSummary);
+    return () => {
+      window.removeEventListener('asr-runtime-status-updated', updateRuntimeSummary);
+    };
+  }, []);
 
   // Convert transcripts to segments for virtualized view
   const segments = useMemo(() =>
@@ -84,6 +126,9 @@ export function TranscriptPanel({
                   </Button>
                 }
               </ButtonGroup>
+            </div>
+            <div className="text-xs text-gray-500 text-center">
+              {runtimeSummary}
             </div>
           </div>
         </div>

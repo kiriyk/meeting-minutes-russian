@@ -8,5 +8,7 @@ numpy>=1.26.0
 onnxruntime>=1.18.0
 
 # Optional: PyAnnote for speaker diarization
-# pip install pyannote.audio>=3.0.0 for full diarization support
-# pyannote.audio>=3.0.0
+# pyannote.audio pulls pyannote.pipeline and related deps.
+pyannote.audio>=3.1.0
+torch>=2.2.0
+torchaudio>=2.2.0

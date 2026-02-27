@@ -19,8 +19,10 @@ from .engines.t_one_engine import TOneEngine
 from .offline_transcribe_manager import OfflineTranscribeManager
 from .schemas import (
     AudioChunkMessage,
+    DownloadBatchModelResponse,
     DownloadModelRequest,
     DownloadModelResponse,
+    DownloadPresetRequest,
     EndSessionMessage,
     EngineStatus,
     ErrorMessage,
@@ -31,6 +33,9 @@ from .schemas import (
     OfflineTranscribeRequest,
     OfflineTranscribeResponse,
     PartialTranscriptMessage,
+    RuntimeComponentStatus,
+    RuntimeEngineStatus,
+    RuntimeStatusResponse,
     StartSessionMessage,
     StatusMessage,
 )
@@ -45,6 +50,50 @@ class SessionRuntime:
     diarizer: Diarizer | None = None
     t_one: TOneEngine | None = None
     gigaam: GigaAMEngine | None = None
+
+
+def build_runtime_status(session_id: str, runtime: SessionRuntime) -> RuntimeStatusResponse:
+    t_one_status = (
+        runtime.t_one.runtime_status()
+        if runtime.t_one is not None
+        else {"backend": "disabled", "acceleration": "none"}
+    )
+    gigaam_status = (
+        runtime.gigaam.runtime_status()
+        if runtime.gigaam is not None
+        else {"backend": "disabled", "acceleration": "none"}
+    )
+
+    if runtime.t_one is not None:
+        vad_status = runtime.t_one.vad_runtime_status()
+    elif runtime.gigaam is not None:
+        vad_status = runtime.gigaam.vad_runtime_status()
+    else:
+        vad_status = {"mode": "disabled", "backend": "none", "acceleration": "none"}
+
+    diarization_status = (
+        runtime.diarizer.runtime_status()
+        if runtime.diarizer is not None
+        else {"mode": "disabled", "backend": "none", "acceleration": "none"}
+    )
+
+    return RuntimeStatusResponse(
+        session_id=session_id,
+        asr={
+            "t_one": RuntimeEngineStatus(
+                enabled=runtime.t_one is not None,
+                backend=t_one_status["backend"],
+                acceleration=t_one_status["acceleration"],
+            ),
+            "gigaam": RuntimeEngineStatus(
+                enabled=runtime.gigaam is not None,
+                backend=gigaam_status["backend"],
+                acceleration=gigaam_status["acceleration"],
+            ),
+        },
+        vad=RuntimeComponentStatus(**vad_status),
+        diarization=RuntimeComponentStatus(**diarization_status),
+    )
 
 
 def create_app(recordings_dir: Path, models_dir: Path) -> FastAPI:
@@ -65,6 +114,63 @@ def create_app(recordings_dir: Path, models_dir: Path) -> FastAPI:
     download_manager = DownloadManager(models_dir=models_dir)
     offline_manager = OfflineTranscribeManager()
     runtimes: dict[str, SessionRuntime] = {}
+    model_presets: dict[str, list[tuple[str, str, str, str, str]]] = {
+        # (model_id, engine, repo_id, filename, revision)
+        "t_one": [
+            ("t-one", "t_one", "t-tech/T-one", "model.onnx", "main"),
+            ("t-one", "t_one", "t-tech/T-one", "vocab.json", "main"),
+            ("t-one", "t_one", "t-tech/T-one", "config.json", "main"),
+            ("t-one", "t_one", "t-tech/T-one", "tokenizer_config.json", "main"),
+            ("t-one", "t_one", "t-tech/T-one", "special_tokens_map.json", "main"),
+        ],
+        "gigaam_v3": [
+            ("GigaAM-v3", "gigaam", "ai-sage/GigaAM-v3", "config.json", "main"),
+            (
+                "GigaAM-v3",
+                "gigaam",
+                "ai-sage/GigaAM-v3",
+                "modeling_gigaam.py",
+                "main",
+            ),
+            (
+                "GigaAM-v3",
+                "gigaam",
+                "ai-sage/GigaAM-v3",
+                "pytorch_model.bin",
+                "main",
+            ),
+            (
+                "GigaAM-v3",
+                "gigaam",
+                "ai-sage/GigaAM-v3",
+                "tokenizer.model",
+                "main",
+            ),
+            (
+                "GigaAM-v3",
+                "gigaam",
+                "ai-sage/GigaAM-v3",
+                "preprocessor.py",
+                "main",
+            ),
+            (
+                "GigaAM-v3",
+                "gigaam",
+                "ai-sage/GigaAM-v3",
+                "train_config.yaml",
+                "main",
+            ),
+        ],
+        "pyannote_diarization": [
+            (
+                "speaker-diarization-3.1",
+                "diarization",
+                "pyannote/speaker-diarization-3.1",
+                "config.yaml",
+                "main",
+            )
+        ],
+    }
 
     @app.on_event("shutdown")
     async def shutdown_event() -> None:
@@ -99,8 +205,26 @@ def create_app(recordings_dir: Path, models_dir: Path) -> FastAPI:
             repo_id=req.repo_id,
             filename=req.filename,
             revision=req.revision,
+            hf_token=req.hf_token,
         )
         return DownloadModelResponse(job_id=job.job_id)
+
+    @app.post("/models/download_preset")
+    async def download_model_preset(
+        req: DownloadPresetRequest,
+    ) -> DownloadBatchModelResponse:
+        jobs: list[str] = []
+        for model_id, engine, repo_id, filename, revision in model_presets[req.preset_id]:
+            job = await download_manager.start_download(
+                model_id=model_id,
+                engine=engine,
+                repo_id=repo_id,
+                filename=filename,
+                revision=revision,
+                hf_token=req.hf_token,
+            )
+            jobs.append(job.job_id)
+        return DownloadBatchModelResponse(job_ids=jobs)
 
     @app.get("/models/local")
     async def local_models() -> LocalModelsResponse:
@@ -108,6 +232,13 @@ def create_app(recordings_dir: Path, models_dir: Path) -> FastAPI:
         return LocalModelsResponse(
             models=[download_manager.model_to_dict(m) for m in models_list]
         )
+
+    @app.get("/runtime_status")
+    async def runtime_status(session_id: str) -> RuntimeStatusResponse:
+        runtime = runtimes.get(session_id)
+        if runtime is None:
+            raise HTTPException(status_code=404, detail="session runtime not found")
+        return build_runtime_status(session_id, runtime)
 
     @app.get("/jobs/{job_id}")
     async def job_status(job_id: str) -> JSONResponse:
@@ -186,6 +317,7 @@ def create_app(recordings_dir: Path, models_dir: Path) -> FastAPI:
                                 enabled=parsed.diarization.enabled,
                                 mode=parsed.diarization.mode,
                                 huggingface_token=parsed.diarization.huggingface_token,
+                                models_dir=models_dir,
                             ),
                         )
                         if "t_one" in parsed.engines:
@@ -208,6 +340,7 @@ def create_app(recordings_dir: Path, models_dir: Path) -> FastAPI:
                                 )
                                 for engine in parsed.engines
                             },
+                            runtime=build_runtime_status(parsed.session_id, runtime),
                         )
                         await ws.send_json(status.model_dump())
                     except (ValidationError, ValueError) as exc:

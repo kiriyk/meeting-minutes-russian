@@ -22,6 +22,7 @@ class DownloadJob:
     filename: str
     revision: str
     target_path: str
+    hf_token: str | None = None
     progress: float = 0.0
     error: str | None = None
 
@@ -51,6 +52,7 @@ class DownloadManager:
         repo_id: str,
         filename: str,
         revision: str = "main",
+        hf_token: str | None = None,
     ) -> DownloadJob:
         safe_model_id = self._sanitize_path_component(model_id)
         target_dir = (
@@ -68,6 +70,7 @@ class DownloadManager:
             filename=filename,
             revision=revision,
             target_path=str(target_file),
+            hf_token=hf_token,
         )
 
         async with self._lock:
@@ -132,8 +135,12 @@ class DownloadManager:
             url = self._hf_resolve_url(job.repo_id, job.revision, job.filename)
             temp_path = target_path.with_suffix(target_path.suffix + ".part")
 
+            headers: dict[str, str] = {}
+            if job.hf_token:
+                headers["Authorization"] = f"Bearer {job.hf_token}"
+
             async with httpx.AsyncClient(timeout=None, follow_redirects=True) as client:
-                async with client.stream("GET", url) as response:
+                async with client.stream("GET", url, headers=headers) as response:
                     response.raise_for_status()
                     total = int(response.headers.get("content-length", "0"))
                     downloaded = 0
@@ -215,7 +222,9 @@ class DownloadManager:
 
     @staticmethod
     def job_to_dict(job: DownloadJob) -> dict:
-        return asdict(job)
+        payload = asdict(job)
+        payload.pop("hf_token", None)
+        return payload
 
     @staticmethod
     def model_to_dict(model: LocalModelInfo) -> dict:

@@ -14,6 +14,17 @@ interface AsrTranscriptPayload {
   confidence?: number | null;
 }
 
+interface AsrRuntimeStatusPayload {
+  type: "status";
+  session_id?: string;
+  runtime?: {
+    session_id: string;
+    asr: Record<string, { enabled: boolean; backend: string; acceleration: string }>;
+    vad: { mode: string; backend: string; acceleration: string };
+    diarization: { mode: string; backend: string; acceleration: string };
+  };
+}
+
 export function AsrLiveBridge() {
   const recordingState = useRecordingState();
   const { addTranscript } = useTranscripts();
@@ -47,7 +58,8 @@ export function AsrLiveBridge() {
     void syncConfig();
     if (!enabled) return;
 
-    let unlisten: UnlistenFn | null = null;
+    let unlistenTranscript: UnlistenFn | null = null;
+    let unlistenRuntime: UnlistenFn | null = null;
 
     const toClockTime = () => {
       const now = new Date();
@@ -55,7 +67,7 @@ export function AsrLiveBridge() {
     };
 
     const setup = async () => {
-      unlisten = await listen<AsrTranscriptPayload>(
+      unlistenTranscript = await listen<AsrTranscriptPayload>(
         "asr-transcript-update",
         (event) => {
           const payload = event.payload;
@@ -97,13 +109,30 @@ export function AsrLiveBridge() {
           });
         },
       );
+
+      unlistenRuntime = await listen<AsrRuntimeStatusPayload>(
+        "asr-runtime-status",
+        (event) => {
+          const runtime = event.payload?.runtime;
+          if (!runtime) return;
+          try {
+            localStorage.setItem("asrRuntimeStatus", JSON.stringify(runtime));
+            window.dispatchEvent(new Event("asr-runtime-status-updated"));
+          } catch {
+            // ignore storage issues
+          }
+        },
+      );
     };
 
     void setup();
 
     return () => {
-      if (unlisten) {
-        unlisten();
+      if (unlistenTranscript) {
+        unlistenTranscript();
+      }
+      if (unlistenRuntime) {
+        unlistenRuntime();
       }
     };
   }, [recordingState.isRecording, addTranscript]);

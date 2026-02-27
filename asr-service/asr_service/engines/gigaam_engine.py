@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Literal
 
 from ..diarization import Diarizer, build_diarizer
 from ..schemas import FinalSegmentMessage, StartSessionMessage
@@ -28,7 +29,7 @@ class _SpeechBuffer:
 
 
 class GigaAMEngine:
-    name = "gigaam"
+    name: Literal["gigaam"] = "gigaam"
 
     def __init__(self, config: StartSessionMessage, diarizer: Diarizer | None = None) -> None:
         self._config = config
@@ -80,6 +81,22 @@ class GigaAMEngine:
 
     async def stop(self) -> None:
         return None
+
+    def runtime_status(self) -> dict[str, str]:
+        primary_backend = self._gigaam_recognizer.backend_name
+        primary_ready = self._gigaam_recognizer.is_ready
+        active_backend = primary_backend if primary_ready else self._fallback_recognizer.backend_name
+        lowered = active_backend.lower()
+        acceleration = "cpu"
+        if "cuda" in lowered or "mps" in lowered or "coreml" in lowered:
+            acceleration = "gpu"
+        return {
+            "backend": active_backend,
+            "acceleration": acceleration,
+        }
+
+    def vad_runtime_status(self) -> dict[str, str]:
+        return self._vad.runtime_status()
 
     def process_chunk(
         self,

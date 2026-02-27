@@ -62,6 +62,8 @@ impl AsrGatewayClient {
 
                             if msg_type == "partial_transcript" || msg_type == "final_segment" {
                                 let _ = app_for_events.emit("asr-transcript-update", payload);
+                            } else if msg_type == "status" {
+                                let _ = app_for_events.emit("asr-runtime-status", payload);
                             } else if msg_type == "error" {
                                 let _ = app_for_events.emit("asr-service-error", payload);
                             }
