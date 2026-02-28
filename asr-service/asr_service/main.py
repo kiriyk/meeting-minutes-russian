@@ -161,15 +161,7 @@ def create_app(recordings_dir: Path, models_dir: Path) -> FastAPI:
                 "main",
             ),
         ],
-        "pyannote_diarization": [
-            (
-                "speaker-diarization-3.1",
-                "diarization",
-                "pyannote/speaker-diarization-3.1",
-                "config.yaml",
-                "main",
-            )
-        ],
+        "pyannote_diarization": [],
     }
 
     @app.on_event("shutdown")
@@ -214,6 +206,26 @@ def create_app(recordings_dir: Path, models_dir: Path) -> FastAPI:
         req: DownloadPresetRequest,
     ) -> DownloadBatchModelResponse:
         jobs: list[str] = []
+        if req.preset_id == "pyannote_diarization":
+            pyannote_repos = [
+                ("speaker-diarization-3.1", "pyannote/speaker-diarization-3.1"),
+                ("segmentation-3.0", "pyannote/segmentation-3.0"),
+                (
+                    "speaker-diarization-community-1",
+                    "pyannote/speaker-diarization-community-1",
+                ),
+            ]
+            for model_id, repo_id in pyannote_repos:
+                job = await download_manager.start_snapshot_download(
+                    model_id=model_id,
+                    engine="diarization",
+                    repo_id=repo_id,
+                    revision="main",
+                    hf_token=req.hf_token,
+                )
+                jobs.append(job.job_id)
+            return DownloadBatchModelResponse(job_ids=jobs)
+
         for model_id, engine, repo_id, filename, revision in model_presets[req.preset_id]:
             job = await download_manager.start_download(
                 model_id=model_id,

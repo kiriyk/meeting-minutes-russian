@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -81,6 +82,12 @@ class PyAnnoteDiarizer:
         huggingface_token: str | None = None,
         local_model_dir: Path | None = None,
     ) -> None:
+        warnings.filterwarnings(
+            "ignore",
+            message=".*torchcodec is not installed correctly.*",
+            category=UserWarning,
+            module=r"pyannote\.audio\.core\.io",
+        )
         from pyannote.audio import Pipeline  # type: ignore
 
         self._source = "remote"
@@ -108,18 +115,60 @@ class PyAnnoteDiarizer:
         if wav.size == 0:
             return None
 
-        diarization = pipeline({"waveform": wav[None, :], "sample_rate": sample_rate})
+        try:
+            import torch
+
+            waveform = torch.from_numpy(wav).unsqueeze(0)
+            with torch.inference_mode():
+                diarization = pipeline(
+                    {"waveform": waveform, "sample_rate": sample_rate}
+                )
+        except Exception as exc:  # pragma: no cover - depends on runtime env
+            logger.warning(
+                "[diarization] pyannote inference failed, speaker=None reason=%s",
+                exc,
+            )
+            return None
 
         # Pick label of the longest annotated turn for this segment.
         best_label: str | None = None
         best_dur = 0.0
-        for turn, _, speaker in diarization.itertracks(yield_label=True):
+        annotation = self._extract_annotation(diarization)
+        if annotation is None:
+            logger.warning(
+                "[diarization] pyannote output unsupported type=%s",
+                type(diarization).__name__,
+            )
+            return None
+
+        for turn, _, speaker in annotation.itertracks(yield_label=True):
             dur = float(turn.end - turn.start)
             if dur > best_dur:
                 best_dur = dur
                 best_label = str(speaker)
 
         return best_label
+
+    @staticmethod
+    def _extract_annotation(diarization: object) -> object | None:
+        # pyannote <=3.x returned an Annotation directly with itertracks().
+        if hasattr(diarization, "itertracks"):
+            return diarization
+
+        # pyannote >=4 may return DiarizeOutput with a speaker_diarization field.
+        for attr in ("speaker_diarization", "annotation", "diarization"):
+            value = getattr(diarization, attr, None)
+            if value is not None and hasattr(value, "itertracks"):
+                return value
+
+        # Fallback for dict-like return shapes.
+        if isinstance(diarization, dict):
+            for key in ("speaker_diarization", "annotation", "diarization"):
+                value = diarization.get(key)
+                if value is not None and hasattr(value, "itertracks"):
+                    return value
+
+        return None
 
     def runtime_status(self) -> dict[str, str]:
         device = str(getattr(self._pipeline, "device", "cpu"))

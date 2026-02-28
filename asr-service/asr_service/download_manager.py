@@ -10,6 +10,7 @@ from urllib.parse import quote
 import httpx
 
 JobStatus = Literal["queued", "running", "completed", "failed"]
+DownloadType = Literal["file", "snapshot"]
 
 
 @dataclass
@@ -22,6 +23,7 @@ class DownloadJob:
     filename: str
     revision: str
     target_path: str
+    download_type: DownloadType = "file"
     hf_token: str | None = None
     progress: float = 0.0
     error: str | None = None
@@ -43,6 +45,7 @@ class DownloadManager:
         self._models_dir.mkdir(parents=True, exist_ok=True)
         self._jobs: dict[str, DownloadJob] = {}
         self._lock = asyncio.Lock()
+        self._snapshot_lock = asyncio.Lock()
 
     async def start_download(
         self,
@@ -79,6 +82,40 @@ class DownloadManager:
         asyncio.create_task(self._download_worker(job.job_id))
         return job
 
+    async def start_snapshot_download(
+        self,
+        *,
+        model_id: str,
+        engine: str,
+        repo_id: str,
+        revision: str = "main",
+        hf_token: str | None = None,
+    ) -> DownloadJob:
+        safe_model_id = self._sanitize_path_component(model_id)
+        target_dir = (
+            self._models_dir / self._sanitize_path_component(engine) / safe_model_id
+        )
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        job = DownloadJob(
+            job_id=str(uuid.uuid4()),
+            status="queued",
+            model_id=model_id,
+            engine=engine,
+            repo_id=repo_id,
+            filename="(snapshot)",
+            revision=revision,
+            target_path=str(target_dir),
+            download_type="snapshot",
+            hf_token=hf_token,
+        )
+
+        async with self._lock:
+            self._jobs[job.job_id] = job
+
+        asyncio.create_task(self._download_worker(job.job_id))
+        return job
+
     async def get_job(self, job_id: str) -> DownloadJob | None:
         async with self._lock:
             return self._jobs.get(job_id)
@@ -90,6 +127,10 @@ class DownloadManager:
             if not engine_dir.is_dir():
                 continue
             engine = engine_dir.name
+            if engine == "hf-cache":
+                # HF cache is managed by huggingface_hub and can contain a deep tree
+                # unrelated to /models/local listing.
+                continue
 
             for model_dir in sorted(engine_dir.iterdir()):
                 if not model_dir.is_dir():
@@ -126,45 +167,70 @@ class DownloadManager:
             job.status = "running"
 
         try:
-            target_path = Path(job.target_path)
-            if target_path.exists() and target_path.stat().st_size > 0:
-                await self._set_job_done(job_id)
-                await self._write_meta(job)
-                return
-
-            url = self._hf_resolve_url(job.repo_id, job.revision, job.filename)
-            temp_path = target_path.with_suffix(target_path.suffix + ".part")
-
-            headers: dict[str, str] = {}
-            if job.hf_token:
-                headers["Authorization"] = f"Bearer {job.hf_token}"
-
-            async with httpx.AsyncClient(timeout=None, follow_redirects=True) as client:
-                async with client.stream("GET", url, headers=headers) as response:
-                    response.raise_for_status()
-                    total = int(response.headers.get("content-length", "0"))
-                    downloaded = 0
-
-                    with temp_path.open("wb") as f:
-                        async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
-                            if not chunk:
-                                continue
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            progress = (
-                                (downloaded / total * 100.0) if total > 0 else 0.0
-                            )
-                            await self._set_job_progress(job_id, min(progress, 99.5))
-
-            temp_path.replace(target_path)
+            if job.download_type == "snapshot":
+                await self._download_snapshot(job_id, job)
+            else:
+                await self._download_file(job_id, job)
             await self._set_job_done(job_id)
             await self._write_meta(job)
         except Exception as exc:
             await self._set_job_failed(job_id, str(exc))
 
+    async def _download_snapshot(self, job_id: str, job: DownloadJob) -> None:
+        from huggingface_hub import snapshot_download
+        from huggingface_hub.utils import disable_progress_bars
+
+        cache_dir = self._models_dir / "hf-cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        await self._set_job_progress(job_id, 1.0)
+
+        # tqdm progress internals may fail under concurrent threaded downloads in
+        # some environments; keep snapshot preloads serialized and disable bars.
+        async with self._snapshot_lock:
+            disable_progress_bars()
+            await asyncio.to_thread(
+                snapshot_download,
+                repo_id=job.repo_id,
+                revision=job.revision,
+                token=job.hf_token,
+                cache_dir=str(cache_dir),
+                max_workers=1,
+                tqdm_class=None,
+            )
+        await self._set_job_progress(job_id, 99.5)
+
+    async def _download_file(self, job_id: str, job: DownloadJob) -> None:
+        target_path = Path(job.target_path)
+        if target_path.exists() and target_path.stat().st_size > 0:
+            return
+
+        url = self._hf_resolve_url(job.repo_id, job.revision, job.filename)
+        temp_path = target_path.with_suffix(target_path.suffix + ".part")
+
+        headers: dict[str, str] = {}
+        if job.hf_token:
+            headers["Authorization"] = f"Bearer {job.hf_token}"
+
+        async with httpx.AsyncClient(timeout=None, follow_redirects=True) as client:
+            async with client.stream("GET", url, headers=headers) as response:
+                response.raise_for_status()
+                total = int(response.headers.get("content-length", "0"))
+                downloaded = 0
+
+                with temp_path.open("wb") as f:
+                    async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        progress = (downloaded / total * 100.0) if total > 0 else 0.0
+                        await self._set_job_progress(job_id, min(progress, 99.5))
+
+        temp_path.replace(target_path)
+
     async def _write_meta(self, job: DownloadJob) -> None:
         target_path = Path(job.target_path)
-        model_dir = target_path.parent
+        model_dir = target_path if job.download_type == "snapshot" else target_path.parent
         meta_path = model_dir / "meta.json"
 
         import json

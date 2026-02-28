@@ -74,7 +74,8 @@ export function useMeetingOperations({
           body: JSON.stringify({
             file_path: filePath,
             engine: selectedOfflineEngine,
-            segment_seconds: 20,
+            // Phrase-based segmentation is used server-side; this is only a hard cap.
+            segment_seconds: 90,
           }),
         });
 
@@ -159,6 +160,10 @@ export function useMeetingOperations({
                 id: `${meeting.id}-${selectedOfflineEngine}-${index + 1}`,
                 text: String(seg.text ?? "").trim(),
                 timestamp: `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`,
+                speaker:
+                  typeof seg.speaker === "string" && seg.speaker.trim().length > 0
+                    ? seg.speaker.trim()
+                    : undefined,
                 audio_start_time: startSec,
                 audio_end_time: endSec,
                 duration: Math.max(0, endSec - startSec),

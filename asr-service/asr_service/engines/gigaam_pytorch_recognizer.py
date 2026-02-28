@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import sys
 import tempfile
 import wave
 from pathlib import Path
@@ -40,6 +42,8 @@ class GigaAMPytorchRecognizer:
             return None
         if not pcm:
             return ""
+        # Some callers mutate PATH after recognizer init; keep ffmpeg resolvable.
+        self._ensure_ffmpeg_available()
 
         try:
             import numpy as np
@@ -70,7 +74,7 @@ class GigaAMPytorchRecognizer:
                 w.setframerate(self._sample_rate)
                 w.writeframes(audio_i16.tobytes())
 
-            out = self._model.transcribe(tmp_path)
+            out = self._transcribe_path(tmp_path)
             return self._normalize_transcribe_output(out)
         except Exception as exc:
             self._error = f"gigaam transcribe failed: {exc}"
@@ -82,6 +86,19 @@ class GigaAMPytorchRecognizer:
                     Path(tmp_path).unlink(missing_ok=True)
                 except Exception:
                     pass
+
+    def _transcribe_path(self, wav_path: str) -> Any:
+        try:
+            return self._model.transcribe(wav_path)
+        except Exception as exc:
+            msg = str(exc)
+            if (
+                "Too long wav file" in msg
+                and hasattr(self._model, "transcribe_longform")
+            ):
+                logger.info("GigaAM short-form rejected long chunk; using transcribe_longform")
+                return self._model.transcribe_longform(wav_path)
+            raise
 
     def _try_init(self) -> None:
         try:
@@ -97,6 +114,8 @@ class GigaAMPytorchRecognizer:
             self._error = "GigaAM model directory not found"
             logger.warning("%s", self._error)
             return
+
+        self._ensure_ffmpeg_available()
 
         try:
             if getattr(torch, "cuda", None) and torch.cuda.is_available():
@@ -131,6 +150,50 @@ class GigaAMPytorchRecognizer:
             self._error = f"failed to load GigaAM model: {exc}"
             self._ready = False
             logger.warning("%s", self._error)
+
+    def _ensure_ffmpeg_available(self) -> None:
+        # GigaAM remote-code loader shells out to "ffmpeg" by executable name.
+        # Make sure this name resolves even when only bundled Meetily binary exists.
+        if shutil.which("ffmpeg"):
+            return
+
+        ffmpeg_bin = self._resolve_ffmpeg_binary()
+        if ffmpeg_bin is None:
+            logger.warning(
+                "ffmpeg was not found for GigaAM live transcription (PATH and bundled binaries)"
+            )
+            return
+
+        ffmpeg_path = Path(ffmpeg_bin)
+        os.environ["MEETILY_FFMPEG_PATH"] = str(ffmpeg_path)
+
+        if ffmpeg_path.name == "ffmpeg":
+            os.environ["PATH"] = (
+                f"{ffmpeg_path.parent}{os.pathsep}{os.environ.get('PATH', '')}"
+            )
+            logger.info("Configured ffmpeg for GigaAM from %s", ffmpeg_path)
+            return
+
+        shim_dir = Path(__file__).resolve().parents[2] / "models" / "tmp" / "ffmpeg-shim"
+        shim_dir.mkdir(parents=True, exist_ok=True)
+        shim_path = shim_dir / ("ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg")
+
+        try:
+            if shim_path.exists() or shim_path.is_symlink():
+                shim_path.unlink(missing_ok=True)
+            try:
+                shim_path.symlink_to(ffmpeg_path)
+            except Exception:
+                shutil.copy2(ffmpeg_path, shim_path)
+            shim_path.chmod(0o755)
+            os.environ["PATH"] = f"{shim_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+            logger.info("Configured ffmpeg shim for GigaAM: %s -> %s", shim_path, ffmpeg_path)
+        except Exception as exc:
+            logger.warning(
+                "failed to prepare ffmpeg shim for GigaAM (%s): %s",
+                ffmpeg_path,
+                exc,
+            )
 
     def _resolve_model_dir(self) -> Path | None:
         # 1) Explicit path wins.
@@ -196,3 +259,65 @@ class GigaAMPytorchRecognizer:
         src_x = np.linspace(0.0, 1.0, num=src_len, endpoint=False)
         dst_x = np.linspace(0.0, 1.0, num=dst_len, endpoint=False)
         return np.interp(dst_x, src_x, audio).astype("float32")
+
+    @staticmethod
+    def _resolve_ffmpeg_binary() -> str | None:
+        # 1) Explicit override.
+        env_path = os.getenv("MEETILY_FFMPEG_PATH")
+        if env_path and Path(env_path).exists():
+            return env_path
+
+        # 2) PATH.
+        from_path = shutil.which("ffmpeg")
+        if from_path:
+            return from_path
+
+        # 3) Meetily bundled binaries.
+        # engines/* lives in asr-service/asr_service/engines, while binaries live in
+        # <repo>/frontend/src-tauri/binaries.
+        service_root = Path(__file__).resolve().parents[2]
+        candidate_dirs = [
+            service_root / "frontend" / "src-tauri" / "binaries",
+            service_root.parent / "frontend" / "src-tauri" / "binaries",
+        ]
+
+        binaries_dir = next((d for d in candidate_dirs if d.exists()), None)
+        if binaries_dir is not None:
+            target_names: list[str] = []
+            if sys.platform == "darwin":
+                target_names.extend(
+                    ["ffmpeg-aarch64-apple-darwin", "ffmpeg-x86_64-apple-darwin"]
+                )
+            elif sys.platform.startswith("linux"):
+                target_names.extend(
+                    [
+                        "ffmpeg-aarch64-unknown-linux-gnu",
+                        "ffmpeg-x86_64-unknown-linux-gnu",
+                    ]
+                )
+            elif sys.platform.startswith("win"):
+                target_names.extend(
+                    [
+                        "ffmpeg-x86_64-pc-windows-msvc.exe",
+                        "ffmpeg-aarch64-pc-windows-msvc.exe",
+                    ]
+                )
+
+            for name in target_names:
+                candidate = binaries_dir / name
+                if candidate.exists() and candidate.is_file():
+                    try:
+                        candidate.chmod(0o755)
+                    except Exception:
+                        pass
+                    return str(candidate)
+
+            for candidate in sorted(binaries_dir.glob("ffmpeg-*")):
+                if candidate.is_file():
+                    try:
+                        candidate.chmod(0o755)
+                    except Exception:
+                        pass
+                    return str(candidate)
+
+        return None
