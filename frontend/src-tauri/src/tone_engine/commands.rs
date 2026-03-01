@@ -138,3 +138,114 @@ pub async fn tone_get_models_directory() -> Result<String, String> {
         None => Err("T-One engine not initialized".into()),
     }
 }
+
+/// Download a T-One model from HuggingFace, emitting progress events.
+#[command]
+pub async fn tone_download_model<R: Runtime>(
+    app_handle: AppHandle<R>,
+    model_name: String,
+) -> Result<(), String> {
+    let engine = { TONE_ENGINE.lock().unwrap().as_ref().cloned() };
+    let engine = engine.ok_or("T-One engine not initialized")?;
+
+    let app_for_progress = app_handle.clone();
+    let model_name_for_progress = model_name.clone();
+
+    let progress_cb: Box<dyn Fn(u8) + Send + Sync> = Box::new(move |pct: u8| {
+        let _ = app_for_progress.emit(
+            "tone-model-download-progress",
+            serde_json::json!({ "modelName": model_name_for_progress, "progress": pct }),
+        );
+    });
+
+    let result = engine
+        .download_model(&model_name, Some(progress_cb))
+        .await
+        .map_err(|e| e.to_string());
+
+    match &result {
+        Ok(()) => {
+            let _ = app_handle.emit(
+                "tone-model-download-complete",
+                serde_json::json!({ "modelName": model_name }),
+            );
+        }
+        Err(err) => {
+            let _ = app_handle.emit(
+                "tone-model-download-error",
+                serde_json::json!({ "modelName": model_name, "error": err }),
+            );
+        }
+    }
+
+    result
+}
+
+/// Cancel an in-progress T-One model download.
+#[command]
+pub async fn tone_cancel_download(model_name: String) -> Result<(), String> {
+    let engine = { TONE_ENGINE.lock().unwrap().as_ref().cloned() };
+    match engine {
+        Some(e) => {
+            e.cancel_download(&model_name).await;
+            Ok(())
+        }
+        None => Err("T-One engine not initialized".into()),
+    }
+}
+
+/// Delete a downloaded T-One model to free up disk space.
+#[command]
+pub async fn tone_delete_model(model_name: String) -> Result<String, String> {
+    let engine = { TONE_ENGINE.lock().unwrap().as_ref().cloned() };
+    match engine {
+        Some(e) => e
+            .delete_model(&model_name)
+            .await
+            .map_err(|e| format!("Failed to delete T-One model: {}", e)),
+        None => Err("T-One engine not initialized".into()),
+    }
+}
+
+/// Auto-select and load an available T-One model. Returns loaded model name.
+/// If `preferred_model_name` is provided and available, it is loaded first.
+pub async fn tone_validate_model_ready_with_config(
+    preferred_model_name: Option<&str>,
+) -> Result<String, String> {
+    let engine = { TONE_ENGINE.lock().unwrap().as_ref().cloned() };
+    let engine = engine.ok_or("T-One engine not initialized")?;
+
+    if engine.is_model_loaded().await {
+        if let Some(name) = engine.get_current_model().await {
+            return Ok(name);
+        }
+    }
+
+    let models = engine
+        .discover_models()
+        .await
+        .map_err(|e| format!("Discover failed: {}", e))?;
+
+    let available_models: Vec<&ToneModelInfo> = models
+        .iter()
+        .filter(|m| matches!(m.status, crate::tone_engine::ToneModelStatus::Available))
+        .collect();
+
+    let chosen = if let Some(preferred) = preferred_model_name {
+        available_models
+            .iter()
+            .find(|m| m.name == preferred)
+            .copied()
+            .or_else(|| available_models.first().copied())
+    } else {
+        available_models.first().copied()
+    }
+    .ok_or("No T-One models available. Place model files in the tone models directory.")?;
+
+    engine
+        .load_model(&chosen.name)
+        .await
+        .map_err(|e| format!("Failed to load {}: {}", chosen.name, e))?;
+
+    Ok(chosen.name.clone())
+}

@@ -69,12 +69,12 @@ pub fn get_available_models() -> Vec<ModelDef> {
         ModelDef {
             name: "gemma3:1b".to_string(),
             display_name: "Gemma 3 1B (Fast)".to_string(),
-            gguf_file: "gemma-3-1b-it-Q8_0.gguf".to_string(),
+            gguf_file: "gemma-3-1b-it-Q4_K_M.gguf".to_string(),
             template: "gemma3".to_string(),
-            download_url: "https://meetily.towardsgeneralintelligence.com/models/gemma-3-1b-it-Q8_0.gguf".to_string(),
-            size_mb: 1019,
-            context_size: 32768, 
-            layer_count: 26,     
+            download_url: "https://huggingface.co/kiriyk/gemma-3-1b-it/resolve/main/gemma-3-1b-it-Q4_K_M.gguf".to_string(),
+            size_mb: 806,
+            context_size: 32768,
+            layer_count: 26,
             sampling: SamplingParams {
                 temperature: 1.0,
                 top_k: 64,
@@ -86,11 +86,11 @@ pub fn get_available_models() -> Vec<ModelDef> {
         ModelDef {
             name: "gemma3:4b".to_string(),
             display_name: "Gemma 3 4B (Balanced)".to_string(),
-            gguf_file: "gemma-3-4b-it-Q4_K_M.gguf".to_string(),
+            gguf_file: "gemma-3-4b-it-q4_k_m.gguf".to_string(),
             template: "gemma3".to_string(),
-            download_url: "https://meetily.towardsgeneralintelligence.com/models/gemma-3-4b-it-Q4_K_M.gguf".to_string(),
-            size_mb: 2374,
-            context_size: 32768, // Supports 128k, but 32k is good for local·
+            download_url: "https://huggingface.co/kiriyk/gemma-3-4b-it/resolve/main/gemma-3-4b-it-q4_k_m.gguf".to_string(),
+            size_mb: 2490,
+            context_size: 32768, // Supports 128k, but 32k is good for local
             layer_count: 35,
             sampling: SamplingParams {
                 temperature: 1.0,

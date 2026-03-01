@@ -1,7 +1,11 @@
 // GigaAM Russian ASR model integration
 import { invoke } from '@tauri-apps/api/core';
 
-export type GigaAmModelStatus = 'Available' | 'Missing';
+export type GigaAmModelStatus =
+    | 'Available'
+    | 'Missing'
+    | { Downloading: number }
+    | { Error: string };
 
 export interface GigaAmModelInfo {
     name: string;
@@ -42,5 +46,17 @@ export class GigaAmAPI {
 
     static async hasAvailableModels(): Promise<boolean> {
         return await invoke('gigaam_has_available_models');
+    }
+
+    static async downloadModel(modelName: string): Promise<void> {
+        await invoke('gigaam_download_model', { modelName });
+    }
+
+    static async cancelDownload(modelName: string): Promise<void> {
+        await invoke('gigaam_cancel_download', { modelName });
+    }
+
+    static async deleteModel(modelName: string): Promise<string> {
+        return await invoke('gigaam_delete_model', { modelName });
     }
 }

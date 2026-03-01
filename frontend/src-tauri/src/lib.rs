@@ -595,6 +595,9 @@ pub fn run() {
             gigaam_engine::commands::gigaam_has_available_models,
             gigaam_engine::commands::gigaam_transcribe_audio,
             gigaam_engine::commands::gigaam_get_models_directory,
+            gigaam_engine::commands::gigaam_download_model,
+            gigaam_engine::commands::gigaam_cancel_download,
+            gigaam_engine::commands::gigaam_delete_model,
             // T-One CTC engine commands
             tone_engine::commands::tone_init,
             tone_engine::commands::tone_get_available_models,
@@ -604,6 +607,9 @@ pub fn run() {
             tone_engine::commands::tone_has_available_models,
             tone_engine::commands::tone_transcribe_audio,
             tone_engine::commands::tone_get_models_directory,
+            tone_engine::commands::tone_download_model,
+            tone_engine::commands::tone_cancel_download,
+            tone_engine::commands::tone_delete_model,
             // Parallel processing commands
             whisper_engine::parallel_commands::initialize_parallel_processor,
             whisper_engine::parallel_commands::start_parallel_processing,

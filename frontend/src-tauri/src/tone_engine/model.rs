@@ -130,6 +130,12 @@ impl ToneModel {
 
         // Reshape to [FRAMES_PER_CHUNK, VOCAB_SIZE] and [1, STATE_SIZE]
         let frames = logprobs.into_dimensionality::<ndarray::Ix3>()?;
+        log::debug!(
+            "T-One logprobs shape: [{}, {}, {}]",
+            frames.shape()[0],
+            frames.shape()[1],
+            frames.shape()[2]
+        );
         let frames_2d = frames
             .slice(ndarray::s![0, .., ..])
             .to_owned()
@@ -146,14 +152,43 @@ impl ToneModel {
     /// argmax per frame → collapse adjacent same → remove blank
     fn ctc_decode(&self, frame_logprobs: &[ndarray::Array2<f32>]) -> String {
         let mut token_ids: Vec<usize> = Vec::new();
-        for frame in frame_logprobs {
-            let best = frame
-                .iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(i, _)| i)
-                .unwrap_or(BLANK_IDX);
-            token_ids.push(best);
+        for chunk_frames in frame_logprobs {
+            let (d0, d1) = chunk_frames.dim();
+            if d1 == self.vocab.len() {
+                // Layout: [frames, vocab]
+                for frame_row in chunk_frames.axis_iter(ndarray::Axis(0)) {
+                    let best = frame_row
+                        .iter()
+                        .enumerate()
+                        .max_by(|(_, a), (_, b)| {
+                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map(|(i, _)| i)
+                        .unwrap_or(BLANK_IDX);
+                    token_ids.push(best);
+                }
+            } else if d0 == self.vocab.len() {
+                // Layout: [vocab, frames]
+                for frame_col in chunk_frames.axis_iter(ndarray::Axis(1)) {
+                    let best = frame_col
+                        .iter()
+                        .enumerate()
+                        .max_by(|(_, a), (_, b)| {
+                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map(|(i, _)| i)
+                        .unwrap_or(BLANK_IDX);
+                    token_ids.push(best);
+                }
+            } else {
+                // Unexpected shape: skip this chunk instead of taking global argmax,
+                // which can inject arbitrary tokens and corrupt transcript quality.
+                log::warn!(
+                    "T-One: unexpected logprobs chunk shape {:?}, expected [frames, vocab] or [vocab, frames] with vocab={}",
+                    chunk_frames.dim(),
+                    self.vocab.len()
+                );
+            }
         }
 
         // Collapse repeats & remove blank

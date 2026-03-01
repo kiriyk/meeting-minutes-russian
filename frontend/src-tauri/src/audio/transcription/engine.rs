@@ -15,6 +15,8 @@ use tauri::{AppHandle, Manager, Runtime};
 pub enum TranscriptionEngine {
     Whisper(Arc<crate::whisper_engine::WhisperEngine>),  // Direct access (backward compat)
     Parakeet(Arc<crate::parakeet_engine::ParakeetEngine>), // Direct access (backward compat)
+    GigaAm(Arc<crate::gigaam_engine::engine::GigaAmEngine>), // Direct access
+    Tone(Arc<crate::tone_engine::engine::ToneEngine>),     // Direct access
     Provider(Arc<dyn TranscriptionProvider>),  // Trait-based (preferred for new code)
 }
 
@@ -24,6 +26,8 @@ impl TranscriptionEngine {
         match self {
             Self::Whisper(engine) => engine.is_model_loaded().await,
             Self::Parakeet(engine) => engine.is_model_loaded().await,
+            Self::GigaAm(engine) => engine.is_model_loaded().await,
+            Self::Tone(engine) => engine.is_model_loaded().await,
             Self::Provider(provider) => provider.is_model_loaded().await,
         }
     }
@@ -33,6 +37,8 @@ impl TranscriptionEngine {
         match self {
             Self::Whisper(engine) => engine.get_current_model().await,
             Self::Parakeet(engine) => engine.get_current_model().await,
+            Self::GigaAm(engine) => engine.get_current_model().await,
+            Self::Tone(engine) => engine.get_current_model().await,
             Self::Provider(provider) => provider.get_current_model().await,
         }
     }
@@ -42,9 +48,46 @@ impl TranscriptionEngine {
         match self {
             Self::Whisper(_) => "Whisper (direct)",
             Self::Parakeet(_) => "Parakeet (direct)",
+            Self::GigaAm(_) => "GigaAM (direct)",
+            Self::Tone(_) => "T-One (direct)",
             Self::Provider(provider) => provider.provider_name(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RussianAsrEngineKind {
+    GigaAm,
+    Tone,
+}
+
+/// Parse saved Russian ASR model id from either:
+/// - composite ids: "gigaam:<name>", "tone:<name>"
+/// - plain ids: "gigaam-v3-e2e-rnnt", "t-one"
+fn parse_russian_asr_model_id(model_id: &str) -> Option<(RussianAsrEngineKind, String)> {
+    let raw = model_id.trim();
+    let lower = raw.to_ascii_lowercase();
+
+    if let Some((engine, name)) = raw.split_once(':') {
+        let engine_lower = engine.trim().to_ascii_lowercase();
+        let name_trimmed = name.trim();
+        return match engine_lower.as_str() {
+            "gigaam" | "gigaam_engine" => {
+                Some((RussianAsrEngineKind::GigaAm, name_trimmed.to_string()))
+            }
+            "tone" | "tone_engine" => Some((RussianAsrEngineKind::Tone, name_trimmed.to_string())),
+            _ => None,
+        };
+    }
+
+    if lower.starts_with("gigaam") {
+        return Some((RussianAsrEngineKind::GigaAm, raw.to_string()));
+    }
+    if lower.contains("t-one") || lower.starts_with("tone") {
+        return Some((RussianAsrEngineKind::Tone, raw.to_string()));
+    }
+
+    None
 }
 
 // ============================================================================
@@ -135,10 +178,57 @@ pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) 
                 }
             }
         }
+        "russianAsr" => {
+            info!("🔍 Validating Russian ASR model...");
+            match parse_russian_asr_model_id(&config.model) {
+                Some((RussianAsrEngineKind::GigaAm, _model_name)) => {
+                    if let Err(init_error) = crate::gigaam_engine::commands::gigaam_init().await {
+                        warn!("❌ Failed to initialize GigaAM engine: {}", init_error);
+                        return Err(format!("Failed to initialize GigaAM: {}", init_error));
+                    }
+                    match crate::gigaam_engine::commands::gigaam_validate_model_ready_with_config(app)
+                        .await
+                    {
+                        Ok(model_name) => {
+                            info!("✅ GigaAM validation successful: {} is ready", model_name);
+                            Ok(())
+                        }
+                        Err(e) => {
+                            warn!("❌ GigaAM validation failed: {}", e);
+                            Err(e)
+                        }
+                    }
+                }
+                Some((RussianAsrEngineKind::Tone, model_name)) => {
+                    if let Err(init_error) = crate::tone_engine::commands::tone_init().await {
+                        warn!("❌ Failed to initialize T-One engine: {}", init_error);
+                        return Err(format!("Failed to initialize T-One: {}", init_error));
+                    }
+                    match crate::tone_engine::commands::tone_validate_model_ready_with_config(
+                        Some(&model_name),
+                    )
+                    .await
+                    {
+                        Ok(loaded_model_name) => {
+                            info!("✅ T-One validation successful: {} is ready", loaded_model_name);
+                            Ok(())
+                        }
+                        Err(e) => {
+                            warn!("❌ T-One validation failed: {}", e);
+                            Err(e)
+                        }
+                    }
+                }
+                None => {
+                    warn!("❌ Unknown Russian ASR model: {}", config.model);
+                    Err(format!("Unknown Russian ASR model: {}", config.model))
+                }
+            }
+        }
         other => {
             warn!("❌ Unsupported transcription provider for local recording: {}", other);
             Err(format!(
-                "Provider '{}' is not supported for local transcription. Please select 'localWhisper' or 'parakeet'.",
+                "Provider '{}' is not supported for local transcription. Please select 'localWhisper', 'parakeet', or 'russianAsr'.",
                 other
             ))
         }
@@ -210,6 +300,46 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
                 None => {
                     Err("Parakeet engine not initialized. This should not happen after validation.".to_string())
                 }
+            }
+        }
+        "russianAsr" => {
+            info!("🇷🇺 Initializing Russian ASR transcription provider");
+            match parse_russian_asr_model_id(&config.model) {
+                Some((RussianAsrEngineKind::GigaAm, _model_name)) => {
+                    let engine = {
+                        let guard = crate::gigaam_engine::commands::GIGAAM_ENGINE.lock().unwrap();
+                        guard.as_ref().cloned()
+                    };
+                    match engine {
+                        Some(engine) => {
+                            if engine.is_model_loaded().await {
+                                info!("✅ GigaAM loaded as Provider");
+                                Ok(TranscriptionEngine::GigaAm(engine))
+                            } else {
+                                Err("GigaAM initialized but no model loaded.".to_string())
+                            }
+                        }
+                        None => Err("GigaAM not initialized.".to_string()),
+                    }
+                }
+                Some((RussianAsrEngineKind::Tone, _model_name)) => {
+                    let engine = {
+                        let guard = crate::tone_engine::commands::TONE_ENGINE.lock().unwrap();
+                        guard.as_ref().cloned()
+                    };
+                    match engine {
+                        Some(engine) => {
+                            if engine.is_model_loaded().await {
+                                info!("✅ T-One loaded as Provider");
+                                Ok(TranscriptionEngine::Tone(engine))
+                            } else {
+                                Err("T-One initialized but no model loaded.".to_string())
+                            }
+                        }
+                        None => Err("T-One not initialized.".to_string()),
+                    }
+                }
+                None => Err(format!("Unknown Russian ASR model: {}", config.model)),
             }
         }
         "localWhisper" | _ => {

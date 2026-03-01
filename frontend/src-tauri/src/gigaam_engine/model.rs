@@ -4,6 +4,7 @@ use ort::inputs;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use ort::value::TensorRef;
+use realfft::RealFftPlanner;
 use std::fs;
 use std::path::Path;
 
@@ -13,6 +14,11 @@ const BLANK_IDX: i32 = 1024;
 const MAX_TOKENS_PER_STEP: usize = 5;
 const PRED_HIDDEN: usize = 320;
 const ENC_HIDDEN: usize = 768;
+const MEL_BINS: usize = 64;
+const SAMPLE_RATE: usize = 16_000;
+const FFT_SIZE: usize = 320;
+const WINDOW_SIZE: usize = 320; // 20ms @ 16kHz
+const HOP_SIZE: usize = 160; // 10ms @ 16kHz
 
 /// LSTM state for GigaAM RNN-T decoder: (h, c) both shape [1, 1, PRED_HIDDEN]
 pub type GigaAmDecoderState = (Array3<f32>, Array3<f32>);
@@ -58,6 +64,14 @@ impl GigaAmModel {
         let decoder = make_session("decoder")?;
         let joint = make_session("joint")?;
 
+        for input in &encoder.inputs {
+            log::info!(
+                "GigaAM encoder input: name={}, type={:?}",
+                input.name,
+                input.input_type
+            );
+        }
+
         // Load vocab.json — a JSON array of piece strings (index = token id)
         let vocab_path = dir.join("vocab.json");
         log::info!("Loading GigaAM vocab: {}", vocab_path.display());
@@ -70,13 +84,14 @@ impl GigaAmModel {
 
     // ----- encoder ---------------------------------------------------------
 
-    /// Run encoder on raw waveform samples.
-    /// inputs:  audio_signal [1, N] (f32), length [1] (i64)
+    /// Run encoder on 64-bin log-mel features.
+    /// inputs:  audio_signal [1, 64, T] (f32), length [1] (i64 = T)
     /// outputs: encoded [1, ENC_HIDDEN, T], encoded_len [1]
     fn encode(&mut self, samples: &[f32]) -> Result<(ArrayD<f32>, usize), GigaAmError> {
-        let n = samples.len();
-        let audio = Array2::from_shape_vec((1, n), samples.to_vec())?.into_dyn();
-        let length = Array1::from_vec(vec![n as i64]).into_dyn();
+        let features = Self::compute_logmel_features(samples);
+        let num_frames = if features.is_empty() { 0 } else { features.len() / MEL_BINS };
+        let audio = Array3::from_shape_vec((1, MEL_BINS, num_frames), features)?.into_dyn();
+        let length = Array1::from_vec(vec![num_frames as i64]).into_dyn();
 
         let inputs = inputs![
             "audio_signal" => TensorRef::from_array_view(audio.view())?,
@@ -89,14 +104,134 @@ impl GigaAmModel {
             .ok_or_else(|| GigaAmError::OutputNotFound("encoded".into()))?
             .try_extract_array()?
             .to_owned();
-        let encoded_len: ArrayD<i64> = outputs
+        let encoded_len_value = outputs
             .get("encoded_len")
-            .ok_or_else(|| GigaAmError::OutputNotFound("encoded_len".into()))?
-            .try_extract_array()?
-            .to_owned();
-
-        let t = encoded_len.as_slice().unwrap_or(&[0])[0] as usize;
+            .ok_or_else(|| GigaAmError::OutputNotFound("encoded_len".into()))?;
+        let t = if let Ok(encoded_len_i64) = encoded_len_value.try_extract_array::<i64>() {
+            encoded_len_i64.as_slice().unwrap_or(&[0])[0] as usize
+        } else if let Ok(encoded_len_i32) = encoded_len_value.try_extract_array::<i32>() {
+            encoded_len_i32.as_slice().unwrap_or(&[0])[0] as usize
+        } else {
+            return Err(GigaAmError::OutputNotFound(
+                "encoded_len (expected i64 or i32)".into(),
+            ));
+        };
         Ok((encoded, t))
+    }
+
+    fn hz_to_mel(hz: f32) -> f32 {
+        2595.0 * (1.0 + hz / 700.0).log10()
+    }
+
+    fn mel_to_hz(mel: f32) -> f32 {
+        700.0 * (10f32.powf(mel / 2595.0) - 1.0)
+    }
+
+    fn build_mel_filterbank() -> Vec<Vec<f32>> {
+        let n_fft_bins = FFT_SIZE / 2 + 1;
+        let f_min = 0.0f32;
+        let f_max = (SAMPLE_RATE as f32) / 2.0;
+        let mel_min = Self::hz_to_mel(f_min);
+        let mel_max = Self::hz_to_mel(f_max);
+
+        let mel_points: Vec<f32> = (0..(MEL_BINS + 2))
+            .map(|i| mel_min + (i as f32) * (mel_max - mel_min) / (MEL_BINS + 1) as f32)
+            .collect();
+        let hz_points: Vec<f32> = mel_points.iter().map(|m| Self::mel_to_hz(*m)).collect();
+
+        let bin_points: Vec<usize> = hz_points
+            .iter()
+            .map(|hz| (((FFT_SIZE + 1) as f32 * *hz) / SAMPLE_RATE as f32).floor() as usize)
+            .map(|b| b.min(n_fft_bins.saturating_sub(1)))
+            .collect();
+
+        let mut filters = vec![vec![0.0f32; n_fft_bins]; MEL_BINS];
+        for m in 1..=MEL_BINS {
+            let left = bin_points[m - 1];
+            let center = bin_points[m];
+            let right = bin_points[m + 1];
+
+            if center > left {
+                for k in left..center {
+                    filters[m - 1][k] = (k - left) as f32 / (center - left) as f32;
+                }
+            }
+            if right > center {
+                for k in center..right {
+                    filters[m - 1][k] = (right - k) as f32 / (right - center) as f32;
+                }
+            }
+        }
+
+        filters
+    }
+
+    /// Return flattened feature tensor for shape [1, MEL_BINS, T] (feature-major).
+    fn compute_logmel_features(samples: &[f32]) -> Vec<f32> {
+        if samples.is_empty() {
+            return Vec::new();
+        }
+
+        let mut planner = RealFftPlanner::<f32>::new();
+        let rfft = planner.plan_fft_forward(FFT_SIZE);
+        let mut fft_input = vec![0.0f32; FFT_SIZE];
+        let mut fft_output = rfft.make_output_vec();
+
+        let mut window = vec![0.0f32; WINDOW_SIZE];
+        for (i, w) in window.iter_mut().enumerate() {
+            *w = 0.54 - 0.46 * ((2.0 * std::f32::consts::PI * i as f32) / (WINDOW_SIZE as f32 - 1.0)).cos();
+        }
+
+        let filters = Self::build_mel_filterbank();
+
+        let mut frames: Vec<Vec<f32>> = Vec::new();
+        let mut start = 0usize;
+        while start < samples.len() {
+            let end = (start + WINDOW_SIZE).min(samples.len());
+            fft_input.fill(0.0);
+
+            for i in 0..(end - start) {
+                fft_input[i] = samples[start + i] * window[i];
+            }
+
+            if rfft.process(&mut fft_input, &mut fft_output).is_err() {
+                break;
+            }
+
+            let power_spectrum: Vec<f32> = fft_output
+                .iter()
+                .map(|c| c.re * c.re + c.im * c.im)
+                .collect();
+
+            let mut mel_vec = vec![0.0f32; MEL_BINS];
+            for m in 0..MEL_BINS {
+                let mut energy = 0.0f32;
+                for (k, &p) in power_spectrum.iter().enumerate() {
+                    energy += filters[m][k] * p;
+                }
+                mel_vec[m] = (energy.max(1e-10)).ln();
+            }
+            frames.push(mel_vec);
+
+            if start + HOP_SIZE >= samples.len() {
+                break;
+            }
+            start += HOP_SIZE;
+        }
+
+        if frames.is_empty() {
+            return Vec::new();
+        }
+
+        let t = frames.len();
+        let mut flattened = Vec::with_capacity(MEL_BINS * t);
+        for m in 0..MEL_BINS {
+            for frame in frames.iter().take(t) {
+                flattened.push(frame[m]);
+            }
+        }
+
+        flattened
     }
 
     // ----- decoder ---------------------------------------------------------

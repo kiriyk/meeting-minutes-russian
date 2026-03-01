@@ -81,6 +81,8 @@ pub fn start_transcription_task<R: Runtime>(
             let engine_clone = match &transcription_engine {
                 TranscriptionEngine::Whisper(e) => TranscriptionEngine::Whisper(e.clone()),
                 TranscriptionEngine::Parakeet(e) => TranscriptionEngine::Parakeet(e.clone()),
+                TranscriptionEngine::GigaAm(e) => TranscriptionEngine::GigaAm(e.clone()),
+                TranscriptionEngine::Tone(e) => TranscriptionEngine::Tone(e.clone()),
                 TranscriptionEngine::Provider(p) => TranscriptionEngine::Provider(p.clone()),
             };
             let app_clone = app.clone();
@@ -154,7 +156,7 @@ pub fn start_transcription_task<R: Runtime>(
                                 Ok((transcript, confidence_opt, is_partial)) => {
                                     // Provider-aware confidence threshold
                                     let confidence_threshold = match &engine_clone {
-                                        TranscriptionEngine::Whisper(_) | TranscriptionEngine::Provider(_) => 0.3,
+                                        TranscriptionEngine::Whisper(_) | TranscriptionEngine::Provider(_) | TranscriptionEngine::GigaAm(_) | TranscriptionEngine::Tone(_) => 0.3,
                                         TranscriptionEngine::Parakeet(_) => 0.0, // Parakeet has no confidence, accept all
                                     };
 
@@ -521,6 +523,44 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                 }
             }
         }
+        TranscriptionEngine::GigaAm(gigaam_engine) => {
+            match gigaam_engine.transcribe_audio(speech_samples).await {
+                Ok(text) => {
+                    let cleaned_text = normalize_final_segment_text(&text);
+                    if cleaned_text.is_empty() {
+                        return Ok((String::new(), None, false));
+                    }
+                    info!(
+                        "GigaAM transcription complete for chunk {}: '{}'",
+                        chunk.chunk_id, cleaned_text
+                    );
+                    Ok((cleaned_text, None, false))
+                }
+                Err(e) => {
+                    error!("GigaAM transcription failed for chunk {}: {}", chunk.chunk_id, e);
+                    Err(TranscriptionError::EngineFailed(e.to_string()))
+                }
+            }
+        }
+        TranscriptionEngine::Tone(tone_engine) => {
+            match tone_engine.transcribe_audio(speech_samples).await {
+                Ok(text) => {
+                    let cleaned_text = normalize_final_segment_text(&text);
+                    if cleaned_text.is_empty() {
+                        return Ok((String::new(), None, false));
+                    }
+                    info!(
+                        "T-One transcription complete for chunk {}: '{}'",
+                        chunk.chunk_id, cleaned_text
+                    );
+                    Ok((cleaned_text, None, false))
+                }
+                Err(e) => {
+                    error!("T-One transcription failed for chunk {}: {}", chunk.chunk_id, e);
+                    Err(TranscriptionError::EngineFailed(e.to_string()))
+                }
+            }
+        }
         TranscriptionEngine::Provider(provider) => {
             // NEW: Trait-based provider (clean, unified interface)
             let language = crate::get_language_preference_internal();
@@ -593,4 +633,39 @@ fn format_recording_time(seconds: f64) -> String {
     let secs = total_seconds % 60;
 
     format!("[{:02}:{:02}]", minutes, secs)
+}
+
+/// Normalize final (non-partial) segment text for engines that don't emit punctuation.
+fn normalize_final_segment_text(text: &str) -> String {
+    let mut normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return normalized;
+    }
+
+    let has_inner_punctuation = normalized
+        .chars()
+        .any(|c| matches!(c, ',' | '.' | '!' | '?' | ';' | ':'));
+    let starts_with_uppercase = normalized
+        .chars()
+        .find(|c| c.is_alphabetic())
+        .map(|c| c.is_uppercase())
+        .unwrap_or(false);
+
+    // If model already produced sentence-like text (uppercase start or punctuation),
+    // keep it as-is after whitespace normalization.
+    if has_inner_punctuation || starts_with_uppercase {
+        return normalized;
+    }
+
+    // Otherwise apply light cleanup for fully "raw" lowercase/no-punctuation output.
+    if let Some(first_char) = normalized.chars().next() {
+        let upper = first_char.to_uppercase().to_string();
+        let first_len = first_char.len_utf8();
+        normalized = format!("{}{}", upper, &normalized[first_len..]);
+    }
+    if !normalized.ends_with('.') && !normalized.ends_with('!') && !normalized.ends_with('?') {
+        normalized.push('.');
+    }
+
+    normalized
 }
