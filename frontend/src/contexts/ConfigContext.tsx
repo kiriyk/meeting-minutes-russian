@@ -186,6 +186,30 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
             model: config.model || 'parakeet-tdt-0.6b-v3-int8',
             apiKey: config.apiKey || null
           });
+
+          // Auto-load the ONNX model for Russian ASR engines after restart
+          const provider = config.provider;
+          const model = config.model;
+          if ((provider === 'russianAsr' || (provider as string) === 'gigaam') && model) {
+            // Determine engine and model name from saved composite ID (e.g. "gigaam:model-name")
+            const colon = model.indexOf(':');
+            const engine = colon >= 0 ? model.slice(0, colon) : provider;
+            const modelName = colon >= 0 ? model.slice(colon + 1) : model;
+
+            console.log(`[ConfigContext] Auto-loading Russian ASR model: engine=${engine} model=${modelName}`);
+            try {
+              if (engine === 'gigaam' || engine === 'gigaam_engine') {
+                await invoke('gigaam_load_model', { modelName });
+                console.log('[ConfigContext] GigaAM model auto-loaded successfully');
+              } else if (engine === 'tone') {
+                await invoke('tone_load_model', { modelName });
+                console.log('[ConfigContext] T-One model auto-loaded successfully');
+              }
+            } catch (modelErr) {
+              // Non-fatal: model files may not be present yet
+              console.warn('[ConfigContext] Failed to auto-load Russian ASR model:', modelErr);
+            }
+          }
         }
       } catch (error) {
         console.error('[ConfigContext] Failed to load transcript config:', error);
@@ -193,6 +217,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     };
     loadTranscriptConfig();
   }, []);
+
 
   // Load model configuration on mount
   useEffect(() => {
