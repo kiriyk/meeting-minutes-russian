@@ -27,6 +27,12 @@ pub fn reset_speech_detected_flag() {
     );
 }
 
+/// Returns true if the transcript text is non-trivial and should be emitted.
+/// Filters empty/whitespace-only text; no confidence gating is applied.
+fn should_emit_transcript(text: &str) -> bool {
+    !text.trim().is_empty()
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TranscriptUpdate {
     pub text: String,
@@ -116,7 +122,8 @@ pub fn start_transcription_task<R: Runtime>(
                 let _ = app.emit("transcription-error", serde_json::json!({
                     "error": e,
                     "userMessage": "Recording failed: Unable to initialize speech recognition. Please check your model settings.",
-                    "actionable": true
+                    "actionable": true,
+                    "phase": "active"
                 }));
                 return;
             }
@@ -219,28 +226,15 @@ pub fn start_transcription_task<R: Runtime>(
                                 .await
                             {
                                 Ok((transcript, confidence_opt, is_partial)) => {
-                                    // Provider-aware confidence threshold
-                                    let confidence_threshold = match &engine_clone {
-                                        TranscriptionEngine::Whisper(_)
-                                        | TranscriptionEngine::Provider(_)
-                                        | TranscriptionEngine::GigaAm(_)
-                                        | TranscriptionEngine::Tone(_) => 0.3,
-                                        TranscriptionEngine::Parakeet(_) => 0.0, // Parakeet has no confidence, accept all
-                                    };
-
                                     let confidence_str = match confidence_opt {
                                         Some(c) => format!("{:.2}", c),
                                         None => "N/A".to_string(),
                                     };
 
-                                    info!("🔍 Worker {} transcription result: text='{}', confidence={}, partial={}, threshold={:.2}",
-                                          worker_id, transcript, confidence_str, is_partial, confidence_threshold);
+                                    info!("🔍 Worker {} transcription result: text='{}', confidence={}, partial={}",
+                worker_id, transcript, confidence_str, is_partial);
 
-                                    // Check confidence threshold (or accept if no confidence provided)
-                                    let meets_threshold =
-                                        confidence_opt.map_or(true, |c| c >= confidence_threshold);
-
-                                    if !transcript.trim().is_empty() && meets_threshold {
+                                    if should_emit_transcript(&transcript) {
                                         // PERFORMANCE: Only log transcription results, not every processing step
                                         info!("✅ Worker {} transcribed: {} (confidence: {}, partial: {})",
                                               worker_id, transcript, confidence_str, is_partial);
@@ -300,12 +294,6 @@ pub fn start_transcription_task<R: Runtime>(
                                             );
                                         }
                                         // PERFORMANCE: Removed verbose logging of every emission
-                                    } else if !transcript.trim().is_empty() && should_log_this_chunk
-                                    {
-                                        // PERFORMANCE: Only log low-confidence results occasionally
-                                        if let Some(c) = confidence_opt {
-                                            info!("Worker {} low-confidence transcription (confidence: {:.2}), skipping", worker_id, c);
-                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -566,7 +554,8 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                         &serde_json::json!({
                             "error": transcription_error.to_string(),
                             "userMessage": format!("Transcription failed: {}", transcription_error),
-                            "actionable": false
+                            "actionable": false,
+                            "phase": "active"
                         }),
                     );
 
@@ -602,7 +591,8 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                         &serde_json::json!({
                             "error": transcription_error.to_string(),
                             "userMessage": format!("Transcription failed: {}", transcription_error),
-                            "actionable": false
+                            "actionable": false,
+                            "phase": "active"
                         }),
                     );
 
@@ -688,7 +678,8 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                         &serde_json::json!({
                             "error": e.to_string(),
                             "userMessage": format!("Transcription failed: {}", e),
-                            "actionable": false
+                            "actionable": false,
+                            "phase": "active"
                         }),
                     );
 
@@ -755,4 +746,21 @@ fn normalize_final_segment_text(text: &str) -> String {
     }
 
     normalized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_short_acknowledgements() {
+        assert!(should_emit_transcript("Yes"));
+        assert!(should_emit_transcript("ok"));
+    }
+
+    #[test]
+    fn drops_empty_and_whitespace_only() {
+        assert!(!should_emit_transcript(""));
+        assert!(!should_emit_transcript("   "));
+    }
 }

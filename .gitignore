@@ -77,7 +77,6 @@ experiments/
 target/
 
 frontend/src-tauri/binaries/
-Cargo.lock
 
 # ASR service
 asr-service/.venv/

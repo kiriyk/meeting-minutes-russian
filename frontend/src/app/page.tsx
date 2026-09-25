@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { motion } from 'framer-motion';
 import { RecordingControls } from '@/components/RecordingControls';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
 import { usePermissionCheck } from '@/hooks/usePermissionCheck';
@@ -191,12 +190,7 @@ export default function Home() {
   const isProcessingStop = status === RecordingStatus.PROCESSING_TRANSCRIPTS || isProcessing;
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.3, ease: 'easeOut' }}
-      className="flex flex-col h-screen bg-gray-50"
-    >
+    <div className="flex flex-col h-screen bg-gray-50">
       <AsrLiveBridge />
       {/* All Modals supported*/}
       <SettingsModals
@@ -262,6 +256,6 @@ export default function Home() {
           sidebarCollapsed={sidebarCollapsed}
         />
       </div>
-    </motion.div>
+    </div>
   );
 }

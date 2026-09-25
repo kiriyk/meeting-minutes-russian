@@ -7,6 +7,17 @@ export type GigaAmModelStatus =
     | { Downloading: number }
     | { Error: string };
 
+// Payload of 'gigaam-model-download-progress'. The Rust side currently emits only
+// modelName + progress; the optional fields mirror ParakeetDownloadProgressEvent.
+export interface GigaAmDownloadProgressEvent {
+    modelName: string;
+    progress: number;
+    downloaded_mb?: number;
+    total_mb?: number;
+    speed_mbps?: number;
+    status?: 'downloading' | 'completed' | 'cancelled' | string;
+}
+
 export interface GigaAmModelInfo {
     name: string;
     path: string;

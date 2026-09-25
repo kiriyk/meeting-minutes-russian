@@ -5,6 +5,7 @@ import { TranscriptView } from "@/components/TranscriptView";
 import { VirtualizedTranscriptView } from "@/components/VirtualizedTranscriptView";
 import { TranscriptButtonGroup } from "./TranscriptButtonGroup";
 import { useMemo } from "react";
+import { OfflineAsrEngine } from "@/hooks/meeting-details/useMeetingOperations";
 
 interface TranscriptPanelProps {
   transcripts: Transcript[];
@@ -23,6 +24,17 @@ interface TranscriptPanelProps {
   totalCount?: number;
   loadedCount?: number;
   onLoadMore?: () => void;
+
+  // Retranscription props
+  meetingId?: string;
+  meetingFolderPath?: string | null;
+  onRefetchTranscripts?: () => Promise<void>;
+
+  // Fork: offline Re-ASR (GigaAM / T-One via asr-service)
+  selectedOfflineEngine?: OfflineAsrEngine;
+  onOfflineEngineChange?: (engine: OfflineAsrEngine) => void;
+  onOfflineRetranscribe?: () => Promise<void>;
+  isOfflineRetranscribing?: boolean;
 }
 
 export function TranscriptPanel({
@@ -40,6 +52,13 @@ export function TranscriptPanel({
   totalCount,
   loadedCount,
   onLoadMore,
+  meetingId,
+  meetingFolderPath,
+  onRefetchTranscripts,
+  selectedOfflineEngine,
+  onOfflineEngineChange,
+  onOfflineRetranscribe,
+  isOfflineRetranscribing,
 }: TranscriptPanelProps) {
   // Convert transcripts to segments if pagination is not used but we want virtualization
   const convertedSegments = useMemo(() => {
@@ -57,7 +76,7 @@ export function TranscriptPanel({
   }, [transcripts, usePagination, segments]);
 
   return (
-    <div className="hidden md:flex md:w-1/4 lg:w-1/3 min-w-0 border-r border-gray-200 bg-white flex-col relative shrink-0">
+    <div className="flex h-full min-w-0 w-full bg-white flex-col relative @container">
       {/* Title area */}
       <div className="p-4 border-b border-gray-200">
         <TranscriptButtonGroup
@@ -68,6 +87,13 @@ export function TranscriptPanel({
           }
           onCopyTranscript={onCopyTranscript}
           onOpenMeetingFolder={onOpenMeetingFolder}
+          meetingId={meetingId}
+          meetingFolderPath={meetingFolderPath}
+          onRefetchTranscripts={onRefetchTranscripts}
+          selectedOfflineEngine={selectedOfflineEngine}
+          onOfflineEngineChange={onOfflineEngineChange}
+          onOfflineRetranscribe={onOfflineRetranscribe}
+          isOfflineRetranscribing={isOfflineRetranscribing}
         />
       </div>
 

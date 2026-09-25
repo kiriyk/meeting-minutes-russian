@@ -1,7 +1,8 @@
-use crate::whisper_engine::{ModelInfo, WhisperEngine};
+use crate::whisper_engine::{is_download_cancelled, CancelDownloadOutcome, ModelInfo, WhisperEngine};
 use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
 use tauri::{command, Emitter, Manager, AppHandle, Runtime};
+use crate::config::WHISPER_MODEL_CATALOG;
 
 // Global whisper engine
 pub static WHISPER_ENGINE: Mutex<Option<Arc<WhisperEngine>>> = Mutex::new(None);
@@ -63,8 +64,63 @@ pub async fn whisper_get_available_models() -> Result<Vec<ModelInfo>, String> {
             .await
             .map_err(|e| format!("Failed to discover models: {}", e))
     } else {
-        Err("Whisper engine not initialized".to_string())
+        // Fallback: scan models directory directly without initialized engine
+        log::info!("Whisper engine not initialized, scanning models directory directly");
+        discover_models_standalone()
     }
+}
+
+/// Discover Whisper models by scanning the models directory directly
+/// Used when the Whisper engine isn't initialized (e.g., when using Parakeet for live transcription)
+fn discover_models_standalone() -> Result<Vec<ModelInfo>, String> {
+    use crate::whisper_engine::ModelStatus;
+
+    let models_dir = get_models_directory()
+        .ok_or_else(|| "Models directory not initialized".to_string())?;
+
+    // Whisper models are stored directly in the models directory (not in a whisper subdirectory)
+    let whisper_dir = models_dir.clone();
+
+    log::info!("Scanning for Whisper models in: {}", whisper_dir.display());
+
+    // Use centralized model catalog from config.rs
+    let model_configs = WHISPER_MODEL_CATALOG;
+
+    let mut models = Vec::new();
+
+    for &(name, filename, size_mb, accuracy, speed, description) in model_configs {
+        let model_path = whisper_dir.join(filename);
+        let status = if model_path.exists() {
+            match std::fs::metadata(&model_path) {
+                Ok(metadata) => {
+                    let file_size_mb = metadata.len() / (1024 * 1024);
+                    if file_size_mb >= 1 {
+                        ModelStatus::Available
+                    } else {
+                        ModelStatus::Missing
+                    }
+                }
+                Err(_) => ModelStatus::Missing,
+            }
+        } else {
+            ModelStatus::Missing
+        };
+
+        models.push(ModelInfo {
+            name: name.to_string(),
+            path: model_path,
+            size_mb,
+            status,
+            accuracy: accuracy.to_string(),
+            speed: speed.to_string(),
+            description: description.to_string(),
+        });
+    }
+
+    let downloaded_count = models.iter().filter(|m| matches!(m.status, ModelStatus::Available)).count();
+    log::info!("Found {} downloaded Whisper models", downloaded_count);
+
+    Ok(models)
 }
 
 #[command]
@@ -409,6 +465,13 @@ pub async fn whisper_download_model(
                 }
                 Ok(())
             }
+            Err(e) if is_download_cancelled(&e) => {
+                // Cancellation is handled by the existing cancel command/UI path. Do not
+                // emit a terminal event or reject the original request, which would
+                // otherwise overwrite that path's Missing state with an error.
+                log::info!("Download cancelled for {}", model_name);
+                Ok(())
+            }
             Err(e) => {
                 // Emit error event
                 if let Err(emit_e) = app_handle.emit(
@@ -429,7 +492,7 @@ pub async fn whisper_download_model(
 }
 
 #[command]
-pub async fn whisper_cancel_download(model_name: String) -> Result<(), String> {
+pub async fn whisper_cancel_download(model_name: String) -> Result<CancelDownloadOutcome, String> {
     let engine = {
         let guard = WHISPER_ENGINE.lock().unwrap();
         guard.as_ref().cloned()

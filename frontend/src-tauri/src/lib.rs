@@ -40,6 +40,7 @@ pub mod anthropic;
 pub mod api;
 pub mod asr_gateway_service;
 pub mod audio;
+pub mod config;
 pub mod console_utils;
 pub mod database;
 pub mod groq;
@@ -70,6 +71,63 @@ static ASR_GATEWAY_ENABLED: AtomicBool = AtomicBool::new(true);
 static ASR_GATEWAY_PORT: AtomicU16 = AtomicU16::new(8765);
 static ASR_ENGINE_T_ONE_ENABLED: AtomicBool = AtomicBool::new(true);
 static ASR_ENGINE_GIGAAM_ENABLED: AtomicBool = AtomicBool::new(true);
+
+#[cfg(target_os = "windows")]
+static ONNX_RUNTIME_INIT_ERROR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub(crate) fn ensure_onnx_runtime_available() -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
+    if let Some(error) = ONNX_RUNTIME_INIT_ERROR.get() {
+        anyhow::bail!("{error}");
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn catch_onnx_runtime_init<F, E>(init: F) -> Result<(), String>
+where
+    F: FnOnce() -> Result<(), E>,
+    E: std::fmt::Display,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(init)) {
+        Ok(result) => result.map_err(|error| error.to_string()),
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("unknown panic");
+            Err(format!("ONNX Runtime initialization panicked: {message}"))
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn record_onnx_runtime_failure(error: String) {
+    log::error!("{error}");
+    let _ = ONNX_RUNTIME_INIT_ERROR.set(error);
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod onnx_runtime_tests {
+    use super::catch_onnx_runtime_init;
+
+    #[test]
+    fn catch_onnx_runtime_init_converts_errors_and_panics() {
+        assert!(catch_onnx_runtime_init(|| Ok::<(), &str>(())).is_ok());
+        assert_eq!(
+            catch_onnx_runtime_init(|| Err::<(), _>("initializer error")),
+            Err("initializer error".to_string())
+        );
+
+        let error = catch_onnx_runtime_init(|| -> Result<(), &str> {
+            panic!("synthetic loader panic");
+        })
+        .unwrap_err();
+        assert!(error.contains("synthetic loader panic"));
+    }
+}
 
 // Global language preference storage (default to "auto-translate" for automatic translation to English)
 static LANGUAGE_PREFERENCE: std::sync::LazyLock<StdMutex<String>> =
@@ -370,16 +428,6 @@ async fn start_recording_with_devices_and_meeting<R: Runtime>(
     }
 }
 
-// Language preference commands
-#[tauri::command]
-async fn get_language_preference() -> Result<String, String> {
-    let language = LANGUAGE_PREFERENCE
-        .lock()
-        .map_err(|e| format!("Failed to get language preference: {}", e))?;
-    log_info!("Retrieved language preference: {}", &*language);
-    Ok(language.clone())
-}
-
 #[tauri::command]
 async fn set_language_preference(language: String) -> Result<(), String> {
     let mut lang_pref = LANGUAGE_PREFERENCE
@@ -497,7 +545,22 @@ pub fn get_asr_gateway_config_internal() -> (bool, u16, bool, bool) {
 pub fn run() {
     log::set_max_level(log::LevelFilter::Info);
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            log_info!(
+                "Second app instance requested with args: {:?}, cwd: {:?}",
+                args,
+                cwd
+            );
+
+            tray::focus_main_window(app);
+        }));
+    }
+
+    builder
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
@@ -513,6 +576,35 @@ pub fn run() {
             tokio::sync::Mutex::new(None),
         )))
         .setup(|_app| {
+            #[cfg(target_os = "windows")]
+            match _app.path().resolve(
+                "onnxruntime.dll",
+                tauri::path::BaseDirectory::Resource,
+            ) {
+                Ok(runtime_path) => {
+                    match catch_onnx_runtime_init(|| {
+                        ort::init_from(runtime_path.to_string_lossy().into_owned())
+                            .with_telemetry(false)
+                            .commit()
+                            .map(|_| ())
+                    }) {
+                        Ok(()) => log::info!(
+                            "Initialized bundled ONNX Runtime from {}",
+                            runtime_path.display()
+                        ),
+                        Err(error) => record_onnx_runtime_failure(format!(
+                            "Failed to initialize bundled ONNX Runtime from {}: {}",
+                            runtime_path.display(),
+                            error
+                        )),
+                    }
+                }
+                Err(error) => record_onnx_runtime_failure(format!(
+                    "Failed to resolve bundled ONNX Runtime resource: {}",
+                    error
+                )),
+            };
+
             log::info!("Application setup complete");
 
             // Initialize system tray
@@ -637,6 +729,18 @@ pub fn run() {
 
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    if let Err(e) = window.hide() {
+                        log::error!("Failed to hide main window on close request: {}", e);
+                    } else {
+                        log::info!("Main window hidden to tray on close request");
+                    }
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             start_recording,
             stop_recording,
@@ -748,10 +852,6 @@ pub fn run() {
             // Reload sync commands (retrieve transcript history and meeting name)
             audio::recording_commands::get_transcript_history,
             audio::recording_commands::get_recording_meeting_name,
-            // Device monitoring commands (AirPods/Bluetooth disconnect/reconnect)
-            audio::recording_commands::poll_audio_device_events,
-            audio::recording_commands::get_reconnection_status,
-            audio::recording_commands::attempt_device_reconnect,
             // Playback device detection (Bluetooth warning)
             audio::recording_commands::get_active_audio_output,
             // Audio recovery commands (for transcript recovery feature)
@@ -798,26 +898,31 @@ pub fn run() {
             api::api_get_custom_openai_config,
             api::api_test_custom_openai_connection,
             // Summary commands
-            summary::api_process_transcript,
-            summary::api_get_summary,
-            summary::api_save_meeting_summary,
-            summary::api_cancel_summary,
+            summary::commands::api_process_transcript,
+            summary::commands::api_get_summary,
+            summary::commands::api_save_meeting_summary,
+            summary::commands::api_get_meeting_summary_language,
+            summary::commands::api_save_meeting_summary_language,
+            summary::commands::api_get_meeting_detected_summary_language,
+            summary::commands::api_save_meeting_detected_summary_language,
+            summary::commands::api_detect_transcript_summary_language,
+            summary::commands::api_cancel_summary,
             // Template commands
-            summary::api_list_templates,
-            summary::api_get_template_details,
-            summary::api_validate_template,
-            summary::api_get_template_json,
-            summary::api_save_template,
-            summary::api_delete_template,
+            summary::template_commands::api_list_templates,
+            summary::template_commands::api_get_template_details,
+            summary::template_commands::api_validate_template,
+            summary::template_commands::api_get_template_json,
+            summary::template_commands::api_save_template,
+            summary::template_commands::api_delete_template,
             // Built-in AI commands
-            summary::summary_engine::builtin_ai_list_models,
-            summary::summary_engine::builtin_ai_get_model_info,
-            summary::summary_engine::builtin_ai_download_model,
-            summary::summary_engine::builtin_ai_cancel_download,
-            summary::summary_engine::builtin_ai_delete_model,
-            summary::summary_engine::builtin_ai_is_model_ready,
-            summary::summary_engine::builtin_ai_get_available_summary_model,
-            summary::summary_engine::builtin_ai_get_recommended_model,
+            summary::summary_engine::commands::builtin_ai_list_models,
+            summary::summary_engine::commands::builtin_ai_get_model_info,
+            summary::summary_engine::commands::builtin_ai_download_model,
+            summary::summary_engine::commands::builtin_ai_cancel_download,
+            summary::summary_engine::commands::builtin_ai_delete_model,
+            summary::summary_engine::commands::builtin_ai_is_model_ready,
+            summary::summary_engine::commands::builtin_ai_get_available_summary_model,
+            summary::summary_engine::commands::builtin_ai_get_recommended_model,
             openrouter::get_openrouter_models,
             audio::recording_preferences::get_recording_preferences,
             audio::recording_preferences::set_recording_preferences,
@@ -829,7 +934,6 @@ pub fn run() {
             audio::recording_preferences::set_audio_backend,
             audio::recording_preferences::get_audio_backend_info,
             // Language preference commands
-            get_language_preference,
             set_language_preference,
             set_asr_gateway_config,
             get_asr_gateway_config,
@@ -880,40 +984,55 @@ pub fn run() {
             // System settings commands
             #[cfg(target_os = "macos")]
             utils::open_system_settings,
+            // Retranscription commands
+            audio::retranscription::start_retranscription_command,
+            audio::retranscription::cancel_retranscription_command,
+            audio::retranscription::is_retranscription_in_progress_command,
+            // Import audio commands
+            audio::import::select_and_validate_audio_command,
+            audio::import::validate_audio_file_command,
+            audio::import::start_import_audio_command,
+            audio::import::cancel_import_command,
+            audio::import::is_import_in_progress_command,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app_handle, event| {
-            if let tauri::RunEvent::Exit = event {
-                log::info!("Application exiting, cleaning up resources...");
-                tauri::async_runtime::block_on(async {
-                    // Clean up database connection and checkpoint WAL
-                    if let Some(app_state) = _app_handle.try_state::<state::AppState>() {
-                        log::info!("Starting database cleanup...");
-                        if let Err(e) = app_state.db_manager.cleanup().await {
-                            log::error!("Failed to cleanup database: {}", e);
+            match event {
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Reopen { .. } => {
+                    tray::focus_main_window(_app_handle);
+                }
+                tauri::RunEvent::Exit => {
+                    log::info!("Application exiting, cleaning up resources...");
+                    tauri::async_runtime::block_on(async {
+                        // Clean up database connection and checkpoint WAL
+                        if let Some(app_state) = _app_handle.try_state::<state::AppState>() {
+                            log::info!("Starting database cleanup...");
+                            if let Err(e) = app_state.db_manager.cleanup().await {
+                                log::error!("Failed to cleanup database: {}", e);
+                            } else {
+                                log::info!("Database cleanup completed successfully");
+                            }
                         } else {
-                            log::info!("Database cleanup completed successfully");
+                            log::warn!("AppState not available for database cleanup (likely first launch)");
                         }
-                    } else {
-                        log::warn!(
-                            "AppState not available for database cleanup (likely first launch)"
-                        );
-                    }
 
-                    // Clean up sidecar
-                    log::info!("Cleaning up sidecar...");
-                    if let Err(e) = summary::summary_engine::force_shutdown_sidecar().await {
-                        log::error!("Failed to force shutdown sidecar: {}", e);
-                    }
+                        // Clean up sidecar
+                        log::info!("Cleaning up sidecar...");
+                        if let Err(e) = summary::summary_engine::force_shutdown_sidecar().await {
+                            log::error!("Failed to force shutdown sidecar: {}", e);
+                        }
 
-                    if let Some(asr_manager) =
-                        _app_handle.try_state::<AsrGatewayServiceManager>()
-                    {
-                        asr_manager.shutdown_for_exit().await;
-                    }
-                });
-                log::info!("Application cleanup complete");
+                        if let Some(asr_manager) =
+                            _app_handle.try_state::<AsrGatewayServiceManager>()
+                        {
+                            asr_manager.shutdown_for_exit().await;
+                        }
+                    });
+                    log::info!("Application cleanup complete");
+                }
+                _ => {}
             }
         });
 }
