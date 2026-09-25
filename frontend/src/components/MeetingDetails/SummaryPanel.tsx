@@ -65,9 +65,12 @@ interface SummaryPanelProps {
       | "completed"
       | "error",
   ) => string;
-  availableTemplates: Array<{ id: string; name: string; description: string }>;
+  availableTemplates: Array<{ id: string; name: string; description: string; is_custom: boolean }>;
   selectedTemplate: string;
   onTemplateSelect: (templateId: string, templateName: string) => void;
+  onGetTemplateJson: (templateId: string) => Promise<string | null>;
+  onSaveTemplate: (templateId: string, templateJson: string) => Promise<boolean>;
+  onDeleteTemplate: (templateId: string) => Promise<boolean>;
   isModelConfigLoading?: boolean;
   onOpenModelSettings?: (openFn: () => void) => void;
   selectedOfflineEngine: OfflineAsrEngine;
@@ -108,6 +111,9 @@ export function SummaryPanel({
   availableTemplates,
   selectedTemplate,
   onTemplateSelect,
+  onGetTemplateJson,
+  onSaveTemplate,
+  onDeleteTemplate,
   isModelConfigLoading = false,
   onOpenModelSettings,
   selectedOfflineEngine,
@@ -148,6 +154,9 @@ export function SummaryPanel({
                 availableTemplates={availableTemplates}
                 selectedTemplate={selectedTemplate}
                 onTemplateSelect={onTemplateSelect}
+                onGetTemplateJson={onGetTemplateJson}
+                onSaveTemplate={onSaveTemplate}
+                onDeleteTemplate={onDeleteTemplate}
                 hasTranscripts={transcripts.length > 0}
                 isModelConfigLoading={isModelConfigLoading}
                 onOpenModelSettings={onOpenModelSettings}
@@ -192,6 +201,9 @@ export function SummaryPanel({
               availableTemplates={availableTemplates}
               selectedTemplate={selectedTemplate}
               onTemplateSelect={onTemplateSelect}
+              onGetTemplateJson={onGetTemplateJson}
+              onSaveTemplate={onSaveTemplate}
+              onDeleteTemplate={onDeleteTemplate}
               hasTranscripts={transcripts.length > 0}
               isModelConfigLoading={isModelConfigLoading}
               onOpenModelSettings={onOpenModelSettings}
@@ -224,6 +236,9 @@ export function SummaryPanel({
               availableTemplates={availableTemplates}
               selectedTemplate={selectedTemplate}
               onTemplateSelect={onTemplateSelect}
+              onGetTemplateJson={onGetTemplateJson}
+              onSaveTemplate={onSaveTemplate}
+              onDeleteTemplate={onDeleteTemplate}
               hasTranscripts={transcripts.length > 0}
               isModelConfigLoading={isModelConfigLoading}
               onOpenModelSettings={onOpenModelSettings}

@@ -14,6 +14,9 @@ pub struct TemplateInfo {
 
     /// Brief description of the template's purpose
     pub description: String,
+
+    /// True if this template is coming from user custom templates directory
+    pub is_custom: bool,
 }
 
 /// Detailed template structure for preview/debugging
@@ -49,10 +52,14 @@ pub async fn api_list_templates<R: Runtime>(
 
     let template_infos: Vec<TemplateInfo> = templates
         .into_iter()
-        .map(|(id, name, description)| TemplateInfo {
-            id,
-            name,
-            description,
+        .map(|(id, name, description)| {
+            let is_custom = templates::is_custom_template(&id);
+            TemplateInfo {
+                id,
+                name,
+                description,
+                is_custom,
+            }
         })
         .collect();
 
@@ -121,6 +128,49 @@ pub async fn api_validate_template<R: Runtime>(
             Err(e)
         }
     }
+}
+
+/// Gets full template JSON for editing
+#[tauri::command]
+pub async fn api_get_template_json<R: Runtime>(
+    _app: tauri::AppHandle<R>,
+    template_id: String,
+) -> Result<String, String> {
+    info!("api_get_template_json called for template_id: {}", template_id);
+    templates::get_template_json(&template_id)
+}
+
+/// Saves a custom template (create or update override)
+#[tauri::command]
+pub async fn api_save_template<R: Runtime>(
+    _app: tauri::AppHandle<R>,
+    template_id: String,
+    template_json: String,
+) -> Result<String, String> {
+    info!("api_save_template called for template_id: {}", template_id);
+
+    let template = templates::save_custom_template(&template_id, &template_json)?;
+    Ok(template.name)
+}
+
+/// Deletes a custom template by id
+///
+/// Built-in templates cannot be deleted, but can be overridden via api_save_template.
+#[tauri::command]
+pub async fn api_delete_template<R: Runtime>(
+    _app: tauri::AppHandle<R>,
+    template_id: String,
+) -> Result<(), String> {
+    info!("api_delete_template called for template_id: {}", template_id);
+
+    if !templates::is_custom_template(&template_id) && templates::get_template(&template_id).is_ok() {
+        return Err(format!(
+            "Built-in template '{}' cannot be deleted. You can edit it to create a custom override.",
+            template_id
+        ));
+    }
+
+    templates::delete_custom_template(&template_id)
 }
 
 #[cfg(test)]

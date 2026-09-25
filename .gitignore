@@ -86,3 +86,9 @@ asr-service/recordings/
 # Python cache artifacts
 **/__pycache__/
 *.pyc
+
+# python ignore
+\.*venv
+
+# agent ignore
+.agent/

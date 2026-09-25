@@ -229,6 +229,9 @@ export default function PageContent({
           availableTemplates={templates.availableTemplates}
           selectedTemplate={templates.selectedTemplate}
           onTemplateSelect={templates.handleTemplateSelection}
+          onGetTemplateJson={templates.getTemplateJson}
+          onSaveTemplate={templates.saveTemplate}
+          onDeleteTemplate={templates.deleteTemplate}
           isModelConfigLoading={false}
           onOpenModelSettings={handleRegisterModalOpen}
           selectedOfflineEngine={meetingOperations.selectedOfflineEngine}

@@ -188,16 +188,16 @@ pub async fn complete_onboarding<R: Runtime>(
     }
     info!("Saved builtin-ai model config: model={}", model);
 
-    // Save transcription model config (parakeet provider) - always parakeet
+    // Save transcription model config (russianAsr provider) - GigaAM by default
     if let Err(e) = SettingsRepository::save_transcript_config(
         pool,
-        "parakeet",
-        "parakeet-tdt-0.6b-v3-int8",
+        "russianAsr",
+        "gigaam-v3-e2e-rnnt",
     ).await {
         error!("Failed to save transcription model config: {}", e);
         return Err(format!("Failed to save transcription model config: {}", e));
     }
-    info!("Saved transcription model config: provider=parakeet, model=parakeet-tdt-0.6b-v3-int8");
+    info!("Saved transcription model config: provider=russianAsr, model=gigaam-v3-e2e-rnnt");
 
     // Step 2: Only NOW mark onboarding as complete (after DB operations succeed)
     let mut status = load_onboarding_status(&app)

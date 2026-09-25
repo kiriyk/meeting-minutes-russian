@@ -8,7 +8,7 @@ import { useOnboarding } from '@/contexts/OnboardingContext';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'framer-motion';
 
-const PARAKEET_MODEL = 'parakeet-tdt-0.6b-v3-int8';
+const GIGAAM_MODEL = 'gigaam-v3-e2e-rnnt';
 
 type DownloadStatus = 'waiting' | 'downloading' | 'completed' | 'error';
 
@@ -41,7 +41,7 @@ export function DownloadProgressStep() {
     status: parakeetDownloaded ? 'completed' : 'waiting',
     progress: parakeetDownloaded ? 100 : 0,
     downloadedMb: 0,
-    totalMb: 670,
+    totalMb: 851,
     speedMbps: 0,
   });
 
@@ -66,7 +66,7 @@ export function DownloadProgressStep() {
       return;
     }
 
-    console.log('[DownloadProgressStep] Retrying Parakeet download');
+    console.log('[DownloadProgressStep] Retrying GigaAM download');
     retryingRef.current = true;
 
     // Reset error state
@@ -80,7 +80,7 @@ export function DownloadProgressStep() {
     }));
 
     try {
-      await invoke('parakeet_retry_download', { modelName: PARAKEET_MODEL });
+      await invoke('gigaam_download_model', { modelName: GIGAAM_MODEL });
       // Progress events will update state
     } catch (error) {
       console.error('[DownloadProgressStep] Retry failed:', error);
@@ -178,37 +178,30 @@ export function DownloadProgressStep() {
     startDownloads();
   }, []);
 
-  // Listen to Parakeet download progress
+  // Listen to GigaAM download progress
   useEffect(() => {
     const unlistenProgress = listen<{
       modelName: string;
       progress: number;
-      downloaded_mb?: number;
-      total_mb?: number;
-      speed_mbps?: number;
-      status?: string;
-    }>('parakeet-model-download-progress', (event) => {
-      const { modelName, progress, downloaded_mb, total_mb, speed_mbps, status } = event.payload;
-      if (modelName === PARAKEET_MODEL) {
+    }>('gigaam-model-download-progress', (event) => {
+      const { modelName, progress } = event.payload;
+      if (modelName === GIGAAM_MODEL) {
         setParakeetState((prev) => ({
           ...prev,
-          status: status === 'completed' ? 'completed' : 'downloading',
+          status: progress >= 100 ? 'completed' : 'downloading',
           progress,
-          downloadedMb: downloaded_mb ?? prev.downloadedMb,
-          totalMb: total_mb ?? prev.totalMb,
-          speedMbps: speed_mbps ?? prev.speedMbps,
         }));
 
-        if (status === 'completed' || progress >= 100) {
+        if (progress >= 100) {
           setParakeetDownloaded(true);
         }
       }
     });
 
     const unlistenComplete = listen<{ modelName: string }>(
-      'parakeet-model-download-complete',
+      'gigaam-model-download-complete',
       (event) => {
-        if (event.payload.modelName === PARAKEET_MODEL) {
+        if (event.payload.modelName === GIGAAM_MODEL) {
           setParakeetState((prev) => ({ ...prev, status: 'completed', progress: 100 }));
           setParakeetDownloaded(true);
         }
@@ -216,9 +209,9 @@ export function DownloadProgressStep() {
     );
 
     const unlistenError = listen<{ modelName: string; error: string }>(
-      'parakeet-model-download-error',
+      'gigaam-model-download-error',
       (event) => {
-        if (event.payload.modelName === PARAKEET_MODEL) {
+        if (event.payload.modelName === GIGAAM_MODEL) {
           setParakeetState((prev) => ({
             ...prev,
             status: 'error',
@@ -253,8 +246,8 @@ export function DownloadProgressStep() {
           status: status === 'completed'
             ? 'completed'
             : status === 'error'
-            ? 'error'
-            : 'downloading',
+              ? 'error'
+              : 'downloading',
           progress,
           downloadedMb: downloaded_mb ?? prev.downloadedMb,
           totalMb: total_mb ?? prev.totalMb,
@@ -296,11 +289,11 @@ export function DownloadProgressStep() {
   const handleContinue = async () => {
     // Verify actual model availability (catches state drift)
     try {
-      await invoke('parakeet_init');
-      const actuallyAvailable = await invoke<boolean>('parakeet_has_available_models');
+      await invoke('gigaam_init');
+      const actuallyAvailable = await invoke<boolean>('gigaam_has_available_models');
 
       if (actuallyAvailable && !parakeetDownloaded) {
-        console.log('[DownloadProgressStep] Model available but state not updated');
+        console.log('[DownloadProgressStep] GigaAM model available but state not updated');
         setParakeetDownloaded(true);
         setParakeetState((prev) => ({
           ...prev,
@@ -314,7 +307,7 @@ export function DownloadProgressStep() {
         return;
       }
     } catch (error) {
-      console.warn('[DownloadProgressStep] Failed to verify model:', error);
+      console.warn('[DownloadProgressStep] Failed to verify GigaAM model:', error);
     }
 
     // Check if downloads are complete for toast notification
@@ -425,7 +418,7 @@ export function DownloadProgressStep() {
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                      d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
               </svg>
               Try Again
             </button>
@@ -446,10 +439,10 @@ export function DownloadProgressStep() {
         {/* Download Cards */}
         <div className="w-full max-w-lg space-y-4">
           {renderDownloadCard(
-            'Transcription Engine',
+            'Transcription Engine (GigaAM)',
             <Mic className="w-5 h-5 text-gray-600" />,
             parakeetState,
-            '~670 MB'
+            '~851 MB'
           )}
 
           {renderDownloadCard(

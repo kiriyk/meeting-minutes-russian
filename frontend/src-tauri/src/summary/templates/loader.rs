@@ -1,9 +1,9 @@
 use super::defaults;
 use super::types::Template;
-use std::path::PathBuf;
-use tracing::{debug, info, warn};
 use once_cell::sync::Lazy;
+use std::path::PathBuf;
 use std::sync::RwLock;
+use tracing::{debug, info, warn};
 
 // Global storage for the bundled templates directory path
 static BUNDLED_TEMPLATES_DIR: Lazy<RwLock<Option<PathBuf>>> = Lazy::new(|| RwLock::new(None));
@@ -27,6 +27,26 @@ fn get_custom_templates_dir() -> Option<PathBuf> {
     path.push("Meetily");
     path.push("templates");
     Some(path)
+}
+
+fn is_valid_template_id(template_id: &str) -> bool {
+    let id = template_id.trim();
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn get_custom_template_path(template_id: &str) -> Result<PathBuf, String> {
+    if !is_valid_template_id(template_id) {
+        return Err(
+            "Invalid template id. Use only letters, numbers, '-' and '_'.".to_string(),
+        );
+    }
+
+    let custom_dir = get_custom_templates_dir()
+        .ok_or_else(|| "Could not resolve custom templates directory".to_string())?;
+    Ok(custom_dir.join(format!("{}.json", template_id.trim())))
 }
 
 /// Load a template from the bundled resources directory
@@ -77,6 +97,62 @@ fn load_custom_template(template_id: &str) -> Option<String> {
             None
         }
     }
+}
+
+pub fn is_custom_template(template_id: &str) -> bool {
+    get_custom_template_path(template_id)
+        .map(|path| path.exists())
+        .unwrap_or(false)
+}
+
+pub fn save_custom_template(template_id: &str, json_content: &str) -> Result<Template, String> {
+    let template = validate_and_parse_template(json_content)?;
+    let template_path = get_custom_template_path(template_id)?;
+
+    if let Some(parent) = template_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create templates directory: {}", e))?;
+    }
+
+    let normalized_json = serde_json::to_string_pretty(&template)
+        .map_err(|e| format!("Failed to serialize template: {}", e))?;
+
+    std::fs::write(&template_path, normalized_json)
+        .map_err(|e| format!("Failed to save template file: {}", e))?;
+
+    info!(
+        "Saved custom template '{}' to {:?}",
+        template_id.trim(),
+        template_path
+    );
+    Ok(template)
+}
+
+pub fn delete_custom_template(template_id: &str) -> Result<(), String> {
+    let template_path = get_custom_template_path(template_id)?;
+
+    if !template_path.exists() {
+        return Err(format!(
+            "Custom template '{}' was not found",
+            template_id.trim()
+        ));
+    }
+
+    std::fs::remove_file(&template_path)
+        .map_err(|e| format!("Failed to delete template file: {}", e))?;
+
+    info!(
+        "Deleted custom template '{}' from {:?}",
+        template_id.trim(),
+        template_path
+    );
+    Ok(())
+}
+
+pub fn get_template_json(template_id: &str) -> Result<String, String> {
+    let template = get_template(template_id)?;
+    serde_json::to_string_pretty(&template)
+        .map_err(|e| format!("Failed to serialize template JSON: {}", e))
 }
 
 /// Load and parse a template by identifier
