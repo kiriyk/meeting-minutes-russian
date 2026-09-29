@@ -302,7 +302,7 @@ async fn run_retranscription<R: Runtime>(
                             &meeting_for_diarization,
                             "diarizing",
                             20 + percentage * 15 / 100,
-                            &format!("Identifying speakers across the recording... {percentage}%"),
+                            "Identifying speakers across the recording (this may take several minutes)...",
                         );
                     }
                     !RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst)
@@ -310,8 +310,9 @@ async fn run_retranscription<R: Runtime>(
             )
         })
         .await;
-        // Community-1 checks between windows; legacy waits for its native call.
-        // Both keep the job busy until cleanup has actually finished.
+        // Cancellation is honoured both before and after speaker inference: the progress
+        // callback above returns false to stop inference early, and this check catches
+        // cancellation requested while inference was already running to completion.
         check_cancelled()?;
         match result {
             Ok(Ok(output)) => {
@@ -336,7 +337,7 @@ async fn run_retranscription<R: Runtime>(
     };
     let speech_segments = if let Some(speech) = community_speech {
         info!(
-            "Community-1 detected {} speech regions; skipping Silero VAD",
+            "Community-1 detected {} speech regions; skipping VAD",
             speech.len()
         );
         speech
