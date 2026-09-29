@@ -584,10 +584,10 @@ pub fn run() {
             ) {
                 Ok(runtime_path) => {
                     match catch_onnx_runtime_init(|| {
-                        ort::init_from(runtime_path.to_string_lossy().into_owned())
-                            .with_telemetry(false)
-                            .commit()
-                            .map(|_| ())
+                        ort::init_from(runtime_path.to_string_lossy().into_owned()).map(|builder| {
+                            // `false` only means an environment already exists; the DLL is loaded either way.
+                            let _ = builder.with_telemetry(false).commit();
+                        })
                     }) {
                         Ok(()) => log::info!(
                             "Initialized bundled ONNX Runtime from {}",

@@ -1,5 +1,5 @@
 use ndarray::{s, Array1, Array2, Array3, ArrayD};
-use ort::execution_providers::CPUExecutionProvider;
+use ort::ep::CPU as CPUExecutionProvider;
 use ort::inputs;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
@@ -37,6 +37,13 @@ pub enum GigaAmError {
     OutputNotFound(String),
 }
 
+// ort rc.12 session-builder methods return a recoverable `Error<SessionBuilder>`.
+impl From<ort::Error<ort::session::builder::SessionBuilder>> for GigaAmError {
+    fn from(error: ort::Error<ort::session::builder::SessionBuilder>) -> Self {
+        Self::Ort(error.into())
+    }
+}
+
 pub struct GigaAmModel {
     encoder: Session,
     decoder: Session,
@@ -64,11 +71,11 @@ impl GigaAmModel {
         let decoder = make_session("decoder")?;
         let joint = make_session("joint")?;
 
-        for input in &encoder.inputs {
+        for input in encoder.inputs() {
             log::info!(
                 "GigaAM encoder input: name={}, type={:?}",
-                input.name,
-                input.input_type
+                input.name(),
+                input.dtype()
             );
         }
 

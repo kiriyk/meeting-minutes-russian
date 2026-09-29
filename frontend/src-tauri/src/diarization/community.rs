@@ -101,7 +101,15 @@ pub fn diarize(
         samples.len() as f64 / 16000.0
     );
     let mut pipeline = create_pipeline(dir)?;
-    let result = pipeline.run_with_progress(samples, &mut progress)?;
+    // Upstream speakrs has no in-run progress hook: cancellation is honoured
+    // before inference and after it returns (the result is then discarded).
+    if !progress(0) {
+        bail!("Diarization cancelled");
+    }
+    let result = pipeline.run(samples)?;
+    if !progress(100) {
+        bail!("Diarization cancelled");
+    }
     // Silence is a successful empty result; it must not trigger another VAD pass.
     let speech_regions = speech_regions_from_counts(&result.speaker_count, samples.len());
     let turns = normalize_turns(result.segments, samples.len());
@@ -266,16 +274,16 @@ mod tests {
             "silence must not trigger fallback VAD"
         );
         assert!(silence.speech_regions.unwrap().is_empty());
-        let mut pipeline = create_pipeline(&dir).unwrap();
-        for stop_at in [5, 45] {
-            let error = pipeline
-                .run_with_progress(&samples, &mut |p| p < stop_at)
-                .err().expect("cancellation must interrupt inference");
+        // Upstream speakrs has no in-run hook: cancellation is checked before (0)
+        // and after (100) inference.
+        for stop_at in [0, 100] {
+            let error = diarize(&samples, &dir, |p| p < stop_at)
+                .err()
+                .expect("cancellation must discard the diarization");
             assert!(error.to_string().contains("cancelled"));
         }
-        let retry = pipeline
-            .run_with_progress(&vec![0.0; 16000], &mut |_| true)
-            .unwrap();
+        let mut pipeline = create_pipeline(&dir).unwrap();
+        let retry = pipeline.run(&vec![0.0; 16000]).unwrap();
         assert!(
             retry.segments.is_empty(),
             "cancellation must not poison a reusable pipeline"

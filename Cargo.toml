@@ -4,7 +4,6 @@ members = [
     "frontend/src-tauri",
     "llama-helper"
 ]
-exclude = ["frontend/src-tauri/vendor/speakrs"]
 
 # Shared workspace settings
 [workspace.package]

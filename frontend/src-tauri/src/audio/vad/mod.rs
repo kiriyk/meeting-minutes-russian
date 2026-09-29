@@ -43,7 +43,7 @@ pub struct ContinuousVadProcessor {
 
 impl ContinuousVadProcessor {
     pub fn new(input_sample_rate: u32, redemption_time_ms: u32) -> Result<Self> {
-        let classifier = classifier::SileroV4Classifier::new()
+        let classifier = classifier::SileroV6Classifier::new()
             .map_err(|e| anyhow!("Failed to create VAD session: {e:?}"))?;
         Ok(Self::with_classifier(input_sample_rate, redemption_time_ms, Box::new(classifier)))
     }
@@ -237,13 +237,23 @@ pub fn get_speech_chunks(samples_mono_16k: &[f32], redemption_time_ms: u32) -> R
 pub fn get_speech_chunks_with_progress<F>(
     samples_mono_16k: &[f32],
     redemption_time_ms: u32,
+    progress_callback: F,
+) -> Result<Vec<SpeechSegment>>
+where
+    F: FnMut(u32, usize) -> bool,
+{
+    let processor = ContinuousVadProcessor::new(16000, redemption_time_ms)?;
+    speech_chunks_with_processor(processor, samples_mono_16k, progress_callback)
+}
+
+fn speech_chunks_with_processor<F>(
+    mut processor: ContinuousVadProcessor,
+    samples_mono_16k: &[f32],
     mut progress_callback: F,
 ) -> Result<Vec<SpeechSegment>>
 where
     F: FnMut(u32, usize) -> bool,
 {
-    let mut processor = ContinuousVadProcessor::new(16000, redemption_time_ms)?;
-
     let total_samples = samples_mono_16k.len();
 
     // For large files (>1 minute at 16kHz = 960,000 samples), process in chunks with progress logging
@@ -322,6 +332,24 @@ mod tests {
             let rms = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
             Ok(if rms > 0.05 { 0.9 } else { 0.05 })
         }
+    }
+
+    /// Synthetic tones are not speech to a neural VAD, so framing/progress/cancellation
+    /// tests use the deterministic energy classifier (Silero v6 frame size).
+    fn energy_processor(redemption_time_ms: u32) -> ContinuousVadProcessor {
+        ContinuousVadProcessor::with_classifier(16_000, redemption_time_ms, Box::new(EnergyClassifier(512)))
+    }
+
+    fn energy_chunks(audio: &[f32], redemption_time_ms: u32) -> Result<Vec<SpeechSegment>> {
+        speech_chunks_with_processor(energy_processor(redemption_time_ms), audio, |_, _| true)
+    }
+
+    fn energy_chunks_with_progress<F: FnMut(u32, usize) -> bool>(
+        audio: &[f32],
+        redemption_time_ms: u32,
+        progress: F,
+    ) -> Result<Vec<SpeechSegment>> {
+        speech_chunks_with_processor(energy_processor(redemption_time_ms), audio, progress)
     }
 
     /// 1 s silence, 2 s tone, 3 s silence, 1.5 s tone, 0.7 s silence.
@@ -422,11 +450,11 @@ mod tests {
         println!("Generated {} samples ({:.1}s)", audio.len(), audio.len() as f32 / 16000.0);
 
         // Process all at once (like small files)
-        let segments_single = get_speech_chunks(&audio, 2000).expect("Single processing failed");
+        let segments_single = energy_chunks(&audio, 2000).expect("Single processing failed");
         println!("Single processing found {} segments", segments_single.len());
 
         // Process in chunks (like large files)
-        let segments_chunked = get_speech_chunks_with_progress(&audio, 2000, |progress, segments| {
+        let segments_chunked = energy_chunks_with_progress(&audio, 2000, |progress, segments| {
             println!("Chunked progress: {}%, {} segments", progress, segments);
             true // Don't cancel
         }).expect("Chunked processing failed");
@@ -451,7 +479,7 @@ mod tests {
         assert!(total_samples > 960_000, "Audio should be large enough to trigger chunked processing");
 
         let mut progress_updates = Vec::new();
-        let segments = get_speech_chunks_with_progress(&audio, 2000, |progress, segments| {
+        let segments = energy_chunks_with_progress(&audio, 2000, |progress, segments| {
             progress_updates.push((progress, segments));
             true // Don't cancel
         }).expect("Processing failed");
@@ -489,7 +517,7 @@ mod tests {
         let audio = generate_test_audio_with_speech(120.0, 16000);
 
         // Cancel at 50%
-        let result = get_speech_chunks_with_progress(&audio, 2000, |progress, _| {
+        let result = energy_chunks_with_progress(&audio, 2000, |progress, _| {
             progress < 50 // Cancel when reaching 50%
         });
 
@@ -502,7 +530,7 @@ mod tests {
     #[test]
     fn test_vad_continuous_processor_state_across_chunks() {
         // Test that VAD state is correctly maintained across chunk boundaries
-        let mut processor = ContinuousVadProcessor::new(16000, 2000).expect("Failed to create processor");
+        let mut processor = energy_processor(2000);
 
         // Generate audio with a speech segment that spans a chunk boundary
         let chunk_size = 160_000; // 10 seconds
@@ -535,8 +563,8 @@ mod tests {
         // Natural pauses within speech (sentence gaps) are 500ms-1.5s
         let audio = generate_test_audio_with_speech(60.0, 16000);
 
-        let segments_400 = get_speech_chunks(&audio, 400).expect("400ms processing failed");
-        let segments_2000 = get_speech_chunks(&audio, 2000).expect("2000ms processing failed");
+        let segments_400 = energy_chunks(&audio, 400).expect("400ms processing failed");
+        let segments_2000 = energy_chunks(&audio, 2000).expect("2000ms processing failed");
 
         println!(
             "400ms redemption: {} segments, 2000ms redemption: {} segments",
@@ -597,7 +625,7 @@ mod tests {
         let audio_duration_ms = (audio.len() as f64 / VAD_SAMPLE_RATE as f64) * 1000.0;
 
         let mut processor =
-            ContinuousVadProcessor::new(16000, 2000).expect("Failed to create processor");
+            energy_processor(2000);
         let segments = processor
             .process_audio(&audio)
             .expect("process_audio failed");
@@ -644,7 +672,7 @@ mod tests {
         assert_eq!(audio.len(), 368_000);
 
         let mut processor =
-            ContinuousVadProcessor::new(16000, 2000).expect("Failed to create processor");
+            energy_processor(2000);
 
         assert!(
             audio.len() % processor.frame_len() != 0,

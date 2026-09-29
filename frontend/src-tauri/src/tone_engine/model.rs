@@ -1,5 +1,5 @@
 use ndarray::{Array2, Array3, ArrayD};
-use ort::execution_providers::CPUExecutionProvider;
+use ort::ep::CPU as CPUExecutionProvider;
 use ort::inputs;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
@@ -30,6 +30,13 @@ pub enum ToneError {
     Json(#[from] serde_json::Error),
     #[error("Model output not found: {0}")]
     OutputNotFound(String),
+}
+
+// ort rc.12 session-builder methods return a recoverable `Error<SessionBuilder>`.
+impl From<ort::Error<ort::session::builder::SessionBuilder>> for ToneError {
+    fn from(error: ort::Error<ort::session::builder::SessionBuilder>) -> Self {
+        Self::Ort(error.into())
+    }
 }
 
 pub struct ToneModel {
