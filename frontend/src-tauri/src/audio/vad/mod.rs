@@ -40,6 +40,9 @@ pub struct ContinuousVadProcessor {
     buffer: Vec<f32>,
     /// 16 kHz samples already classified (excludes flush padding).
     fed_samples: usize,
+    /// Highest 1,000,000-sample multiple of `retained_samples()` already warned about;
+    /// keeps the long-continuous-speech warning from firing on every frame.
+    retained_warning_multiple: usize,
 }
 
 impl ContinuousVadProcessor {
@@ -66,6 +69,7 @@ impl ContinuousVadProcessor {
             input_sample_rate,
             buffer: Vec::with_capacity(frame * 2),
             fed_samples: 0,
+            retained_warning_multiple: 0,
         }
     }
 
@@ -149,6 +153,14 @@ impl ContinuousVadProcessor {
     }
 
     /// Flush remaining audio; an utterance in progress ends at the real audio end.
+    ///
+    /// This finishes the processor: any partial frame still buffered is zero-padded
+    /// and classified, which advances the segmenter's internal sample counter past
+    /// `fed_samples` (by up to one frame of padding) while `fed_samples` itself is set
+    /// to the real (unpadded) end. Calling `process_audio` again after `flush()` would
+    /// feed audio against that mismatched state and drift subsequent timestamps by up
+    /// to one frame. Do not call `process_audio` after `flush()`; create a new
+    /// processor instead.
     pub fn flush(&mut self) -> Result<Vec<SpeechSegment>> {
         let real_end = self.fed_samples + self.buffer.len();
         let mut completed = Vec::new();
@@ -181,8 +193,17 @@ impl ContinuousVadProcessor {
                 s.samples.len()
             );
         }
-        if self.segmenter.retained_samples() > 1_000_000 {
-            warn!("VAD: retaining {} samples of active speech", self.segmenter.retained_samples());
+        // Rate-limited: only warn when crossing each additional 1,000,000-sample
+        // multiple, instead of on every frame during long continuous speech.
+        let retained = self.segmenter.retained_samples();
+        if retained <= 1_000_000 {
+            self.retained_warning_multiple = 0;
+        } else {
+            let current_multiple = retained / 1_000_000;
+            if current_multiple > self.retained_warning_multiple {
+                warn!("VAD: retaining {retained} samples of active speech");
+                self.retained_warning_multiple = current_multiple;
+            }
         }
         Ok(segment)
     }
@@ -488,9 +509,10 @@ mod tests {
 
         println!("Found {} segments with {} progress updates", segments.len(), progress_updates.len());
 
-        // The synthetic signal is not real speech, so Silero may merge it into
-        // one long segment. This test is specifically for the large-file path:
-        // it must still emit speech and report monotonic progress through 100%.
+        // This uses the deterministic EnergyClassifier (see `energy_processor` above),
+        // not a neural VAD, so segment boundaries follow the synthetic signal's energy
+        // exactly. This test is specifically for the large-file path: it must still
+        // emit speech and report monotonic progress through 100%.
         assert!(!segments.is_empty(), "Expected at least one speech segment");
         assert!(
             segments.iter().all(|segment| !segment.samples.is_empty()
@@ -620,6 +642,11 @@ mod tests {
     /// utterance starts, which is why it took a long recording to surface. The private
     /// field that carried the bug is gone, so this now checks the same invariant on the
     /// emitted segment's public timestamps instead.
+    ///
+    /// This runs on the deterministic `EnergyClassifier`, not Silero: the original bug
+    /// lived in the Silero-era wrapper that computed `speech_start_sample`, but this
+    /// test guards the processor/segmenter timestamp math itself, which is classifier-
+    /// independent.
     #[test]
     fn speech_start_never_exceeds_audio_fed() {
         // 20s of silence, then 3s of speech still running when the buffer ends.
