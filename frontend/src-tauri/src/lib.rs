@@ -936,6 +936,8 @@ pub fn run() {
             audio::recording_preferences::get_audio_backend_info,
             // Language preference commands
             set_language_preference,
+            audio::vad::engine::set_vad_engine,
+            audio::vad::engine::get_vad_engine,
             set_asr_gateway_config,
             get_asr_gateway_config,
             get_asr_gateway_service_status,

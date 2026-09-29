@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use log::{debug, info, warn};
 
 pub mod classifier;
+pub mod engine;
 pub mod segmenter;
 
 use classifier::FrameClassifier;
@@ -43,9 +44,10 @@ pub struct ContinuousVadProcessor {
 
 impl ContinuousVadProcessor {
     pub fn new(input_sample_rate: u32, redemption_time_ms: u32) -> Result<Self> {
-        let classifier = classifier::SileroV6Classifier::new()
-            .map_err(|e| anyhow!("Failed to create VAD session: {e:?}"))?;
-        Ok(Self::with_classifier(input_sample_rate, redemption_time_ms, Box::new(classifier)))
+        let requested = engine::selected_vad_engine();
+        let (classifier, used) = engine::create_classifier(requested);
+        info!("VAD engine: requested {requested:?}, using {used:?}");
+        Ok(Self::with_classifier(input_sample_rate, redemption_time_ms, classifier))
     }
 
     pub(crate) fn with_classifier(
