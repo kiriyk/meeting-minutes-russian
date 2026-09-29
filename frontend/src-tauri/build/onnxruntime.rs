@@ -11,9 +11,9 @@ use std::{
 use std::os::windows::fs::MetadataExt;
 
 const WINDOWS_X64_TARGET: &str = "x86_64-pc-windows-msvc";
-const ARCHIVE_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-1.22.0.zip";
-const ARCHIVE_SHA256: &str = "174c616efc0271194488642a72f1a514e01487da4dfe84c49296d66e40ebe0da";
-const ARCHIVE_SIZE: u64 = 72_368_545;
+const ARCHIVE_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-win-x64-1.24.4.zip";
+const ARCHIVE_SHA256: &str = "d2319fddfb6ea4db99ccc4b60c85c517bcd855721f5daa6a06d40d7cb2ee2357";
+const ARCHIVE_SIZE: u64 = 74_442_783;
 
 struct Artifact {
     archive_path: &'static str,
@@ -24,19 +24,19 @@ struct Artifact {
 
 const ARTIFACTS: [Artifact; 3] = [
     Artifact {
-        archive_path: "onnxruntime-win-x64-1.22.0/lib/onnxruntime.dll",
+        archive_path: "onnxruntime-win-x64-1.24.4/lib/onnxruntime.dll",
         output_name: "onnxruntime.dll",
-        size: 12_418_080,
-        sha256: "579b636403983254346a5c1d80bd28f1519cd1e284cd204f8d4ff41f8d711559",
+        size: 14_203_464,
+        sha256: "b95efb2113b603bbbf3f191061c5516a871ed546893c820e4f3b7b6c358dbf2a",
     },
     Artifact {
-        archive_path: "onnxruntime-win-x64-1.22.0/lib/onnxruntime_providers_shared.dll",
+        archive_path: "onnxruntime-win-x64-1.24.4/lib/onnxruntime_providers_shared.dll",
         output_name: "onnxruntime_providers_shared.dll",
-        size: 22_064,
-        sha256: "ba00ea1ef846c9b909c7854bc56c51051a20f9773b3e1153dda118d4b85d0b93",
+        size: 22_088,
+        sha256: "f2540b89707b47895c2a732bfd04e34a695c580d22301ef44c0f01f09b001673",
     },
     Artifact {
-        archive_path: "onnxruntime-win-x64-1.22.0/LICENSE",
+        archive_path: "onnxruntime-win-x64-1.24.4/LICENSE",
         output_name: "onnxruntime-LICENSE.txt",
         size: 1_094,
         sha256: "c250d6278f0b47a6439fb7592b08b58a55eb9f535aa49a1db63211c3f982b674",
