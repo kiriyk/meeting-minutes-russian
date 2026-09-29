@@ -6,6 +6,7 @@ import { SelectedDevices } from '@/components/DeviceSelection';
 import { configService, ModelConfig } from '@/services/configService';
 import { invoke } from '@tauri-apps/api/core';
 import Analytics from '@/lib/analytics';
+import { applyVadEngine, readStoredVadEngine, type VadEngine } from '@/lib/vad';
 import { BetaFeatures, BetaFeatureKey, loadBetaFeatures, saveBetaFeatures } from '@/types/betaFeatures';
 
 export interface OllamaModel {
@@ -59,6 +60,10 @@ interface ConfigContextType {
   // Language preference
   selectedLanguage: string;
   setSelectedLanguage: (lang: string) => void;
+
+  // VAD engine preference
+  vadEngine: VadEngine;
+  setVadEngine: (engine: VadEngine) => void;
 
   // UI preferences
   showConfidenceIndicator: boolean;
@@ -147,6 +152,9 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     }
     return 'auto';
   });
+
+  // VAD engine preference state
+  const [vadEngine, setVadEngineState] = useState<VadEngine>(() => readStoredVadEngine());
 
   // UI preferences state
   const [showConfidenceIndicator, setShowConfidenceIndicator] = useState<boolean>(() => {
@@ -249,7 +257,14 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
           console.error('[ConfigContext] Failed to sync language preference to Rust on startup:', err);
         });
     }
-  }, []); 
+  }, []);
+
+  // Sync VAD engine preference to Rust on mount (setting lives in memory only in Rust)
+  useEffect(() => {
+    applyVadEngine(vadEngine).catch(err =>
+      console.error('[ConfigContext] Failed to sync VAD engine to Rust on startup:', err)
+    );
+  }, []);
 
   // Load model configuration on mount
   useEffect(() => {
@@ -511,6 +526,12 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     );
   }, []);
 
+  // Wrapper for setVadEngine that persists to localStorage and syncs to Rust
+  const setVadEngine = useCallback((engine: VadEngine) => {
+    setVadEngineState(engine);
+    applyVadEngine(engine).catch(err => console.error('Failed to apply VAD engine:', err));
+  }, []);
+
   const value: ConfigContextType = useMemo(() => ({
     modelConfig,
     setModelConfig,
@@ -525,6 +546,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     setSelectedDevices,
     selectedLanguage,
     setSelectedLanguage: handleSetSelectedLanguage,
+    vadEngine,
+    setVadEngine,
     showConfidenceIndicator,
     toggleConfidenceIndicator,
     betaFeatures,
@@ -548,6 +571,8 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     selectedDevices,
     selectedLanguage,
     handleSetSelectedLanguage,
+    vadEngine,
+    setVadEngine,
     showConfidenceIndicator,
     toggleConfidenceIndicator,
     betaFeatures,
