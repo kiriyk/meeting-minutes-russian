@@ -79,7 +79,12 @@ impl GigaAmModel {
         let vocab: Vec<String> = serde_json::from_str(&raw)?;
         log::info!("GigaAM vocab size={} (blank={})", vocab.len(), BLANK_IDX);
 
-        Ok(Self { encoder, decoder, joint, vocab })
+        Ok(Self {
+            encoder,
+            decoder,
+            joint,
+            vocab,
+        })
     }
 
     // ----- encoder ---------------------------------------------------------
@@ -89,7 +94,11 @@ impl GigaAmModel {
     /// outputs: encoded [1, ENC_HIDDEN, T], encoded_len [1]
     fn encode(&mut self, samples: &[f32]) -> Result<(ArrayD<f32>, usize), GigaAmError> {
         let features = Self::compute_logmel_features(samples);
-        let num_frames = if features.is_empty() { 0 } else { features.len() / MEL_BINS };
+        let num_frames = if features.is_empty() {
+            0
+        } else {
+            features.len() / MEL_BINS
+        };
         let audio = Array3::from_shape_vec((1, MEL_BINS, num_frames), features)?.into_dyn();
         let length = Array1::from_vec(vec![num_frames as i64]).into_dyn();
 
@@ -139,27 +148,16 @@ impl GigaAmModel {
             .collect();
         let hz_points: Vec<f32> = mel_points.iter().map(|m| Self::mel_to_hz(*m)).collect();
 
-        let bin_points: Vec<usize> = hz_points
-            .iter()
-            .map(|hz| (((FFT_SIZE + 1) as f32 * *hz) / SAMPLE_RATE as f32).floor() as usize)
-            .map(|b| b.min(n_fft_bins.saturating_sub(1)))
-            .collect();
-
+        // Torchaudio constructs triangles at continuous frequencies. Rounding
+        // the endpoints to FFT bins creates zero-width low-frequency filters.
         let mut filters = vec![vec![0.0f32; n_fft_bins]; MEL_BINS];
-        for m in 1..=MEL_BINS {
-            let left = bin_points[m - 1];
-            let center = bin_points[m];
-            let right = bin_points[m + 1];
-
-            if center > left {
-                for k in left..center {
-                    filters[m - 1][k] = (k - left) as f32 / (center - left) as f32;
-                }
-            }
-            if right > center {
-                for k in center..right {
-                    filters[m - 1][k] = (right - k) as f32 / (right - center) as f32;
-                }
+        for m in 0..MEL_BINS {
+            let (left, center, right) = (hz_points[m], hz_points[m + 1], hz_points[m + 2]);
+            for k in 0..n_fft_bins {
+                let hz = k as f32 * SAMPLE_RATE as f32 / FFT_SIZE as f32;
+                filters[m][k] = ((hz - left) / (center - left))
+                    .min((right - hz) / (right - center))
+                    .max(0.0);
             }
         }
 
@@ -168,7 +166,7 @@ impl GigaAmModel {
 
     /// Return flattened feature tensor for shape [1, MEL_BINS, T] (feature-major).
     fn compute_logmel_features(samples: &[f32]) -> Vec<f32> {
-        if samples.is_empty() {
+        if samples.len() < WINDOW_SIZE {
             return Vec::new();
         }
 
@@ -179,15 +177,17 @@ impl GigaAmModel {
 
         let mut window = vec![0.0f32; WINDOW_SIZE];
         for (i, w) in window.iter_mut().enumerate() {
-            *w = 0.54 - 0.46 * ((2.0 * std::f32::consts::PI * i as f32) / (WINDOW_SIZE as f32 - 1.0)).cos();
+            // Official GigaAM-v3 uses torchaudio's periodic Hann window.
+            *w = 0.5 - 0.5 * ((2.0 * std::f32::consts::PI * i as f32) / WINDOW_SIZE as f32).cos();
         }
 
         let filters = Self::build_mel_filterbank();
 
         let mut frames: Vec<Vec<f32>> = Vec::new();
         let mut start = 0usize;
-        while start < samples.len() {
-            let end = (start + WINDOW_SIZE).min(samples.len());
+        // center=false: only complete 320-sample windows contribute frames.
+        while start + WINDOW_SIZE <= samples.len() {
+            let end = start + WINDOW_SIZE;
             fft_input.fill(0.0);
 
             for i in 0..(end - start) {
@@ -209,7 +209,7 @@ impl GigaAmModel {
                 for (k, &p) in power_spectrum.iter().enumerate() {
                     energy += filters[m][k] * p;
                 }
-                mel_vec[m] = (energy.max(1e-10)).ln();
+                mel_vec[m] = (energy.clamp(1e-9, 1e9)).ln();
             }
             frames.push(mel_vec);
 
@@ -288,7 +288,7 @@ impl GigaAmModel {
         &mut self,
         enc_frame: &ArrayD<f32>, // shape [1, ENC_HIDDEN, T]; we take frame t
         t: usize,
-        dec_out: &ArrayD<f32>,   // shape [1, 1, PRED_HIDDEN]
+        dec_out: &ArrayD<f32>, // shape [1, 1, PRED_HIDDEN]
     ) -> Result<i32, GigaAmError> {
         // Slice enc frame: [ENC_HIDDEN] → reshape to [1, ENC_HIDDEN, 1]
         let enc_slice = enc_frame.slice(s![0, .., t]).to_owned(); // [ENC_HIDDEN]
@@ -370,11 +370,7 @@ impl GigaAmModel {
             })
             .collect();
 
-        pieces
-            .join("")
-            .replace('\u{2581}', " ")
-            .trim()
-            .to_string()
+        pieces.join("").replace('\u{2581}', " ").trim().to_string()
     }
 
     // ----- public API ------------------------------------------------------
@@ -391,5 +387,27 @@ impl GigaAmModel {
         log::debug!("GigaAM: decoded {} tokens", token_ids.len());
 
         Ok(self.detokenize(&token_ids))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn logmel_matches_official_torchaudio_preprocessor() {
+        let samples: Vec<f32> = (0..640)
+            .map(|i| ((i * 37 % 200) as f32 - 100.0) / 512.0)
+            .collect();
+        let reference: serde_json::Value =
+            serde_json::from_str(include_str!("testdata/logmel-reference.json")).unwrap();
+        let expected = reference["features"].as_array().unwrap();
+        let actual = GigaAmModel::compute_logmel_features(&samples);
+        assert_eq!(actual.len(), expected.len());
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (*actual as f64 - expected.as_f64().unwrap()).abs() < 0.002,
+                "feature {index}: {actual} != {expected}"
+            );
+        }
     }
 }
