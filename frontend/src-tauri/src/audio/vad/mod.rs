@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 pub mod segmenter;
+pub mod classifier;
 
 /// Silero VAD only operates at 16kHz; input is resampled to this rate, and every
 /// sample count and timestamp inside this module is expressed in it.
