@@ -577,31 +577,61 @@ mod tests {
         samples
     }
 
-    /// `speech_start_sample` records where the current utterance began, so it can
-    /// never point past the number of samples the VAD has actually seen.
+    /// A speech segment's `start_timestamp_ms` must never point past the audio the VAD
+    /// has actually been fed: it must be non-negative, no later than the segment's own
+    /// `end_timestamp_ms`, and no later than the duration of audio supplied so far.
     ///
-    /// It used to, because it was computed as `processed_samples + timestamp_ms` where
-    /// silero's `timestamp_ms` is ALREADY session-absolute
-    /// (`processed_duration() - pre_speech_pad`), which doubled the position. The only
-    /// reader is the force-end branch in `flush()`, so in production the corruption
-    /// escaped as one phantom segment per recording, timestamped past the end of the
-    /// audio. The error grows with how late the utterance starts, which is why it took
-    /// a long recording to surface.
+    /// This used to be violated because `speech_start_sample` was computed as
+    /// `processed_samples + timestamp_ms` where silero's `timestamp_ms` is ALREADY
+    /// session-absolute (`processed_duration() - pre_speech_pad`), which doubled the
+    /// position. The only reader was the force-end branch in `flush()`, so in
+    /// production the corruption escaped as one phantom segment per recording,
+    /// timestamped past the end of the audio. The error grows with how late the
+    /// utterance starts, which is why it took a long recording to surface. The private
+    /// field that carried the bug is gone, so this now checks the same invariant on the
+    /// emitted segment's public timestamps instead.
     #[test]
-    fn test_speech_start_sample_never_exceeds_processed_samples() {
+    fn speech_start_never_exceeds_audio_fed() {
         // 20s of silence, then 3s of speech still running when the buffer ends.
         let audio = generate_late_speech_audio(20.0, 3.0, 16000);
+        let audio_duration_ms = (audio.len() as f64 / VAD_SAMPLE_RATE as f64) * 1000.0;
 
         let mut processor =
             ContinuousVadProcessor::new(16000, 2000).expect("Failed to create processor");
-        processor
+        let segments = processor
             .process_audio(&audio)
             .expect("process_audio failed");
+        assert!(
+            segments.is_empty(),
+            "process_audio completed a segment, so flush() would not exercise force-end"
+        );
 
         assert!(
             processor.is_speaking(),
             "expected to still be mid-speech at the end of the buffer; the invariant \
              below would not be exercised otherwise"
+        );
+
+        let flushed = processor.flush().expect("flush failed");
+        assert_eq!(flushed.len(), 1, "force-end must emit exactly one segment");
+
+        let segment = &flushed[0];
+        assert!(
+            segment.start_timestamp_ms >= 0.0,
+            "segment starts before the beginning of the audio: {:.0}ms",
+            segment.start_timestamp_ms
+        );
+        assert!(
+            segment.start_timestamp_ms <= segment.end_timestamp_ms,
+            "segment starts after it ends: {:.0}ms -> {:.0}ms",
+            segment.start_timestamp_ms,
+            segment.end_timestamp_ms
+        );
+        assert!(
+            segment.start_timestamp_ms <= audio_duration_ms,
+            "segment starts at {:.0}ms, beyond the {:.0}ms of audio fed so far",
+            segment.start_timestamp_ms,
+            audio_duration_ms
         );
     }
 
