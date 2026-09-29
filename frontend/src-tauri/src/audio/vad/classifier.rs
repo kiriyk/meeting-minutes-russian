@@ -41,6 +41,31 @@ impl FrameClassifier for EarshotClassifier {
     }
 }
 
+/// Temporary adapter kept only until the ort rc.12 switch (Task 4 deletes it).
+pub struct SileroV4Classifier {
+    session: silero_rs::VadSession,
+}
+
+impl SileroV4Classifier {
+    pub fn new() -> Result<Self> {
+        crate::ensure_onnx_runtime_available()?;
+        let config = silero_rs::VadConfig { sample_rate: 16_000, ..Default::default() };
+        Ok(Self { session: silero_rs::VadSession::new(config)? })
+    }
+}
+
+impl FrameClassifier for SileroV4Classifier {
+    fn frame_len(&self) -> usize {
+        512
+    }
+
+    fn predict(&mut self, frame: &[f32]) -> Result<f32> {
+        let output = self.session.forward(frame.to_vec())?;
+        let probs = output.try_extract_array::<f32>()?;
+        probs.first().copied().ok_or_else(|| anyhow::anyhow!("Silero returned no probability"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
