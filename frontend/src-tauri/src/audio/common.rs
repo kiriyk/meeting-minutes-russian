@@ -83,6 +83,7 @@ pub(crate) fn write_transcripts_json(folder: &Path, segments: &[TranscriptSegmen
                 "id": s.id,
                 "text": s.text,
                 "timestamp": s.timestamp,
+                "speaker": s.speaker,
                 "audio_start_time": s.audio_start_time,
                 "audio_end_time": s.audio_end_time,
                 "duration": s.duration,
@@ -215,6 +216,19 @@ pub(crate) fn split_segment_at_silence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcript_json_preserves_speaker_labels() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut segments = create_transcript_segments(&[("Привет".into(), 1000.0, 2000.0)]);
+        segments[0].speaker = Some("SPEAKER_00".into());
+        write_transcripts_json(directory.path(), &segments).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join("transcripts.json")).unwrap(),
+        ).unwrap();
+        assert_eq!(json["segments"][0]["speaker"], "SPEAKER_00");
+        assert_eq!(json["segments"][0]["audio_start_time"], 1.0);
+    }
 
     #[tokio::test]
     async fn test_engine_lifecycle_lock_serializes_acquirers() {

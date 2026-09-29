@@ -48,6 +48,7 @@ pub mod constants;
 
 // Retranscription module (re-process stored audio with different settings)
 pub mod retranscription;
+mod retranscription_engine;
 
 // Import module (import external audio files as new meetings)
 pub mod import;
@@ -119,4 +120,3 @@ pub use decoder::{decode_audio_file, DecodedAudio};
 
 // Export audio constants
 pub use constants::AUDIO_EXTENSIONS;
-

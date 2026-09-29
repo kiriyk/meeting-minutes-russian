@@ -58,6 +58,16 @@ async function load(meetingId: string, hasMore = false) {
 }
 
 describe('paginated transcript request ownership', () => {
+  test('retains speaker labels and audio timestamps for paginated display', async () => {
+    await show('A');
+    await resolve(request('metadata', 'A'), metadata('A'));
+    const response = page('Реплика');
+    response.transcripts[0].speaker = 'SPEAKER_01';
+    response.transcripts[0].audio_start_time = 3;
+    response.transcripts[0].audio_end_time = 5;
+    await resolve(request('transcripts', 'A'), response);
+    expect(state.segments[0]).toMatchObject({ speaker: 'SPEAKER_01', timestamp: 3, endTime: 5 });
+  });
   test('ignores late A metadata after B finishes and does not start A transcripts', async () => {
     await show('A');
     const stale = request('metadata', 'A');

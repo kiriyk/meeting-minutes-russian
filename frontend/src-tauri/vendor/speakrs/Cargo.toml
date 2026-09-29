@@ -1,0 +1,47 @@
+[package]
+name = "speakrs"
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/avencera/speakrs"
+description = "Pinned Community-1 pipeline adapted to Meetily's ONNX Runtime"
+
+[features]
+default = ["default-linalg"]
+default-linalg = ["dep:ndarray-linalg-default"]
+online = []
+coreml = []
+cuda = ["ort/cuda"]
+migraphx = []
+load-dynamic = ["ort/load-dynamic", "dep:libloading"]
+intel-mkl = []
+openblas-static = []
+openblas-system = []
+_metrics = []
+
+[dependencies]
+kodama = "0.3.0"
+ndarray = "0.16"
+ndarray-npy = "0.9"
+ort = { version = "=2.0.0-rc.10", features = ["ndarray"] }
+libloading = { version = "0.8", optional = true }
+tracing = "0.1"
+thiserror = "2"
+crossbeam-channel = "0.5"
+rayon = "1"
+
+# Apple SDK provides BLAS and LAPACK; no Homebrew or Fortran toolchain is needed.
+[target.'cfg(target_os = "macos")'.dependencies]
+ndarray-linalg-default = { package = "ndarray-linalg", version = "0.17", default-features = false, optional = true }
+
+[target.'cfg(all(target_os = "windows", target_arch = "x86_64"))'.dependencies]
+ndarray-linalg-default = { package = "ndarray-linalg", version = "0.17", default-features = false, features = ["intel-mkl-static"], optional = true }
+
+[target.'cfg(all(not(target_os = "macos"), not(all(target_os = "windows", target_arch = "x86_64"))))'.dependencies]
+ndarray-linalg-default = { package = "ndarray-linalg", version = "0.17", default-features = false, features = ["openblas-static"], optional = true }
+
+[dev-dependencies]
+approx = "0.5"
+serde_json = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

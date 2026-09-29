@@ -5,7 +5,6 @@ import { TranscriptView } from "@/components/TranscriptView";
 import { VirtualizedTranscriptView } from "@/components/VirtualizedTranscriptView";
 import { TranscriptButtonGroup } from "./TranscriptButtonGroup";
 import { useMemo } from "react";
-import { OfflineAsrEngine } from "@/hooks/meeting-details/useMeetingOperations";
 
 interface TranscriptPanelProps {
   transcripts: Transcript[];
@@ -30,11 +29,7 @@ interface TranscriptPanelProps {
   meetingFolderPath?: string | null;
   onRefetchTranscripts?: () => Promise<void>;
 
-  // Fork: offline Re-ASR (GigaAM / T-One via asr-service)
-  selectedOfflineEngine?: OfflineAsrEngine;
-  onOfflineEngineChange?: (engine: OfflineAsrEngine) => void;
-  onOfflineRetranscribe?: () => Promise<void>;
-  isOfflineRetranscribing?: boolean;
+
 }
 
 export function TranscriptPanel({
@@ -55,10 +50,6 @@ export function TranscriptPanel({
   meetingId,
   meetingFolderPath,
   onRefetchTranscripts,
-  selectedOfflineEngine,
-  onOfflineEngineChange,
-  onOfflineRetranscribe,
-  isOfflineRetranscribing,
 }: TranscriptPanelProps) {
   // Convert transcripts to segments if pagination is not used but we want virtualization
   const convertedSegments = useMemo(() => {
@@ -72,6 +63,7 @@ export function TranscriptPanel({
       endTime: t.audio_end_time,
       text: t.text,
       confidence: t.confidence,
+      speaker: t.speaker,
     }));
   }, [transcripts, usePagination, segments]);
 
@@ -90,10 +82,6 @@ export function TranscriptPanel({
           meetingId={meetingId}
           meetingFolderPath={meetingFolderPath}
           onRefetchTranscripts={onRefetchTranscripts}
-          selectedOfflineEngine={selectedOfflineEngine}
-          onOfflineEngineChange={onOfflineEngineChange}
-          onOfflineRetranscribe={onOfflineRetranscribe}
-          isOfflineRetranscribing={isOfflineRetranscribing}
         />
       </div>
 

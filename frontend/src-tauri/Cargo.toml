@@ -6,7 +6,7 @@ authors = ["Sujith S"]
 license = "MIT"
 repository = "https://github.com/Zackriya-Solutions/meeting-minutes"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.88"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -53,6 +53,7 @@ openblas = ["whisper-rs/openblas"] # Optimized BLAS (Auto-enabled on Windows/Lin
 openmp = ["whisper-rs/openmp"]     # OpenMP parallel processing
 
 [build-dependencies]
+cc = "1"
 tauri-build = { version = "2.3.0", features = [] }
 reqwest = { version = "0.11", features = ["blocking", "multipart", "json", "stream"] }
 which = "6.0.1"
@@ -107,6 +108,11 @@ silero_rs = { git = "https://github.com/emotechlab/silero-rs", rev = "26a6460", 
 
 # Parakeet (ONNX-based fast transcription) dependencies
 ort = { version = "2.0.0-rc.10", features = ["half"] }  # ONNX Runtime for Parakeet + T-One models
+sherpa-onnx-sys = { version = "=1.13.8", default-features = false, features = ["static"] }
+speakrs = { path = "vendor/speakrs", default-features = false, features = ["default-linalg"] }
+bzip2 = "0.4"
+tar = "0.4"
+sha2 = "0.10"
 thiserror = "2.0.16"                # Error handling for Parakeet
 
 # GigaAM tokenizer vocab is loaded from a pre-generated vocab.json file (no native dep needed)

@@ -43,6 +43,7 @@ pub mod audio;
 pub mod config;
 pub mod console_utils;
 pub mod database;
+pub mod diarization;
 pub mod groq;
 pub mod notifications;
 pub mod ollama;
@@ -986,6 +987,9 @@ pub fn run() {
             utils::open_system_settings,
             // Retranscription commands
             audio::retranscription::start_retranscription_command,
+            diarization::diarization_get_model_status,
+            diarization::diarization_download_models,
+            diarization::diarization_cancel_download,
             audio::retranscription::cancel_retranscription_command,
             audio::retranscription::is_retranscription_in_progress_command,
             // Import audio commands

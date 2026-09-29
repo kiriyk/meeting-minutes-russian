@@ -4,11 +4,12 @@ members = [
     "frontend/src-tauri",
     "llama-helper"
 ]
+exclude = ["frontend/src-tauri/vendor/speakrs"]
 
 # Shared workspace settings
 [workspace.package]
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.88"
 
 # Shared dependencies that can be inherited by workspace members
 [workspace.dependencies]

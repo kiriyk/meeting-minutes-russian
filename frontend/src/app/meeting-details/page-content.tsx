@@ -137,10 +137,7 @@ export default function PageContent({
     blockNoteSummaryRef: meetingData.blockNoteSummaryRef,
   });
 
-  const meetingOperations = useMeetingOperations({
-    meeting,
-    onMeetingUpdated,
-  });
+  const meetingOperations = useMeetingOperations({ meeting });
 
   // Track page view
   useEffect(() => {
@@ -219,10 +216,6 @@ export default function PageContent({
               meetingId={meeting.id}
               meetingFolderPath={meeting.folder_path}
               onRefetchTranscripts={onRefetchTranscripts}
-              selectedOfflineEngine={meetingOperations.selectedOfflineEngine}
-              onOfflineEngineChange={meetingOperations.setSelectedOfflineEngine}
-              onOfflineRetranscribe={meetingOperations.handleRetranscribeWithGigaam}
-              isOfflineRetranscribing={meetingOperations.isRetranscribing}
             />
           }
           summary={

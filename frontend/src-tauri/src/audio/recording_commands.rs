@@ -319,6 +319,9 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     );
 
     let engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
+    if super::retranscription::is_retranscription_in_progress() {
+        return Err("Wait for retranscription to finish before recording".to_string());
+    }
 
     // Check if already recording
     let current_recording_state = IS_RECORDING.load(Ordering::SeqCst);
@@ -513,6 +516,9 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     );
 
     let engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
+    if super::retranscription::is_retranscription_in_progress() {
+        return Err("Wait for retranscription to finish before recording".to_string());
+    }
 
     // Check if already recording
     let current_recording_state = IS_RECORDING.load(Ordering::SeqCst);
