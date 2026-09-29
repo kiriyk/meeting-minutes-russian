@@ -94,7 +94,7 @@ Raw Audio (Mic + System)
     RecordingSaver.save()      WhisperEngine.transcribe()
 ```
 
-**Key Insight**: The pipeline performs **professional audio mixing** (RMS-based ducking, clipping prevention) for recording, while simultaneously applying **Voice Activity Detection (VAD)** to send only speech segments to Whisper for transcription.
+**Key Insight**: The pipeline performs **professional audio mixing** (RMS-based ducking, clipping prevention) for recording, while simultaneously applying **Voice Activity Detection (VAD)** to send only speech segments to Whisper for transcription. VAD classification and segmentation live in `frontend/src-tauri/src/audio/vad/` (`mod.rs`, `segmenter.rs`, `classifier.rs`, `engine.rs`), separate from the mixing logic in `pipeline.rs`. The VAD engine is a global, user-selectable setting (`engine.rs`): **Silero VAD v6** (default, ONNX via `ort`) or **Earshot** (pure Rust, no ONNX Runtime), which is also the automatic fallback when ONNX Runtime is unavailable.
 
 ### Audio Device Modularization (Recently Completed)
 
@@ -115,7 +115,12 @@ audio/
 │   ├── microphone.rs          # Microphone capture stream
 │   ├── system.rs              # System audio capture stream
 │   └── core_audio.rs          # macOS ScreenCaptureKit integration
-├── pipeline.rs                # Audio mixing and VAD processing
+├── pipeline.rs                # Audio mixing, VAD invocation and distribution
+├── vad/                        # VAD engine selection, classification, segmentation
+│   ├── mod.rs                 # ContinuousVadProcessor (framing + segment assembly)
+│   ├── engine.rs               # Global VadEngine setting (SileroV6 default, Earshot fallback)
+│   ├── classifier.rs           # FrameClassifier impls (SileroV6Classifier, EarshotClassifier)
+│   └── segmenter.rs            # Engine-independent speech segmentation
 ├── recording_manager.rs       # High-level recording coordination
 ├── recording_commands.rs      # Tauri command interface
 └── recording_saver.rs         # Audio file writing
@@ -126,6 +131,7 @@ audio/
 - Microphone/speaker problems → `devices/microphone.rs` or `devices/speakers.rs`
 - Audio capture issues → `capture/microphone.rs` or `capture/system.rs`
 - Mixing/processing problems → `pipeline.rs`
+- VAD engine/segmentation issues → `audio/vad/{mod.rs,segmenter.rs,classifier.rs,engine.rs}`
 - Recording workflow → `recording_manager.rs`
 
 ### Rust ↔ Frontend Communication (Tauri Architecture)
@@ -378,6 +384,8 @@ $env:RUST_LOG="debug"; ./clean_run_windows.bat
 
 7. **Audio Permissions**: Request permissions early. macOS requires both microphone AND screen recording for system audio.
 
+8. **Community-1 / ort Versioning**: Community-1 speakrs is a crates.io dependency; ort is pinned to =2.0.0-rc.12 because ort-sys allows one version per binary.
+
 ## Repository-Specific Conventions
 
 - **Logging Format**: Rust logs should include enough module context to diagnose app behavior
@@ -398,7 +406,8 @@ $env:RUST_LOG="debug"; ./clean_run_windows.bat
 
 **Audio System**:
 - [frontend/src-tauri/src/audio/recording_manager.rs](frontend/src-tauri/src/audio/recording_manager.rs) - Recording orchestration
-- [frontend/src-tauri/src/audio/pipeline.rs](frontend/src-tauri/src/audio/pipeline.rs) - Audio mixing and VAD
+- [frontend/src-tauri/src/audio/pipeline.rs](frontend/src-tauri/src/audio/pipeline.rs) - Audio mixing and VAD invocation
+- [frontend/src-tauri/src/audio/vad/mod.rs](frontend/src-tauri/src/audio/vad/mod.rs) - VAD engine selection, classification, segmentation
 - [frontend/src-tauri/src/audio/recording_saver.rs](frontend/src-tauri/src/audio/recording_saver.rs) - Audio file writing
 
 **UI Components**:

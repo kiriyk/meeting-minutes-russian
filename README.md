@@ -61,11 +61,12 @@ This repository is a fork of [Meetily](https://github.com/Zackriya-Solutions/mee
   Модели скачиваются с Hugging Face ([GigaAM](https://huggingface.co/kiriyk/GigaAM-v3-onnx-rnnt-e2e), [T-one](https://huggingface.co/kiriyk/T-one-onnx-ctc)) при онбординге или в настройках транскрипции.
 - **Онбординг под русский язык.** При первом запуске основной ASR-моделью скачивается GigaAM.
 - **Нативная ретранскрибация (Enhance).** Сохранённую встречу можно заново распознать любой скачанной моделью (Whisper, Parakeet, GigaAM, T-one) с прогрессом, отменой и транзакционной заменой транскрипта: при отмене или ошибке прежний транскрипт сохраняется. Требуется включить beta-настройку Import & Retranscribe.
+- **Выбор VAD.** В настройках транскрипции можно выбрать детектор речи: **Silero VAD v6.2** (по умолчанию, ONNX) или **Earshot** (чистый Rust, без ONNX Runtime). Настройка действует на live-запись, импорт и ретранскрибацию; если ONNX Runtime недоступен, автоматически используется Earshot.
 - **Диаризация спикеров.** В диалоге ретранскрибации включена опция **Identify speakers** с выбором модели:
-  - **Community-1** (по умолчанию) — полный Rust-конвейер [pyannote Community-1](https://huggingface.co/pyannote/speaker-diarization-community-1) через вендоренный [speakrs](https://github.com/avencera/speakrs) 0.5.0: segmentation 3.0, WeSpeaker, PLDA, VBx. ~60 МБ, CPU. Его сегментация заменяет отдельный Silero VAD.
-  - **Pyannote + TitaNet (legacy)** — конвейер sherpa-onnx, ~44 МБ, с Silero VAD.
+  - **Community-1** (по умолчанию) — полный Rust-конвейер [pyannote Community-1](https://huggingface.co/pyannote/speaker-diarization-community-1) через [speakrs](https://github.com/avencera/speakrs) 0.5.0: segmentation 3.0, WeSpeaker, PLDA, VBx. ~60 МБ, CPU. Его сегментация заменяет отдельный VAD; отмена срабатывает до и после определения спикеров.
+  - **Pyannote + TitaNet (legacy)** — конвейер sherpa-onnx, ~44 МБ, с выбранным VAD.
 
-  Спикеры получают метки `SPEAKER_00`, `SPEAKER_01`, … в порядке появления; метки сохраняются в SQLite и `transcripts.json` и отображаются в транскрипте. Скачанные файлы проверяются по SHA-256. Если моделей нет или диаризация упала, текст распознаётся через Silero без меток спикеров с предупреждением.
+  Спикеры получают метки `SPEAKER_00`, `SPEAKER_01`, … в порядке появления; метки сохраняются в SQLite и `transcripts.json` и отображаются в транскрипте. Скачанные файлы проверяются по SHA-256. Если моделей нет или диаризация упала, текст распознаётся с выбранным VAD без меток спикеров с предупреждением.
 - **Быстрый оффлайн-ресемплинг.** Файлы конвертируются потоковым FFT-ресемплером блоками, с прогрессом и отменой; длительность и таймкоды записи сохраняются.
 - **Пользовательские шаблоны саммари.** Шаблоны можно создавать, редактировать и удалять прямо в генераторе саммари; они хранятся в пользовательской папке рядом со встроенными.
 - **Опциональный ASR-шлюз** (`asr-service/`, экспериментально). Отдельный Python-сервис для live-распознавания через WebSocket; протокол описан в [docs/ASR_PROTOCOL.md](docs/ASR_PROTOCOL.md). Для основных сценариев не нужен.
@@ -84,8 +85,10 @@ pnpm run tauri:dev      # или ./clean_run.sh на macOS
 Требования сверх upstream:
 
 - **Rust 1.88+** и C++-компилятор с поддержкой исключений.
-- Линейная алгебра для PLDA: на macOS — системный Accelerate, на Windows x86_64 — статический Intel MKL, на Linux — статический OpenBLAS.
+- Линейная алгебра для PLDA (speakrs): статический Intel MKL на x86_64, статический OpenBLAS на остальных платформах (включая macOS arm64).
+- ONNX Runtime: `ort` 2.0.0-rc.12 (API 24); на Windows в сборку кладётся ONNX Runtime 1.24.4.
 - `sherpa-onnx-sys` 1.13.8 при первой сборке скачивает нативные библиотеки; для оффлайн-сборки задайте `SHERPA_ONNX_LIB_DIR` или `SHERPA_ONNX_ARCHIVE_DIR`.
+- На macOS OpenBLAS (speakrs, статически) линкуется с SDK, который возвращает `xcrun`; если Command Line Tools дают более новый SDK, чем понимает линкер Xcode, сборка падает с `unknown architecture arm64e...` — обновите Xcode/CLT до согласованных версий или явно возьмите SDK из Xcode: `export SDKROOT=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk`. Компилятор Fortran не нужен — OpenBLAS использует свой LAPACK на C.
 
 Тесты:
 
@@ -98,7 +101,7 @@ bun test tests                               # фронтенд
 pnpm exec tsc --noEmit --incremental false   # проверка типов
 ```
 
-Smoke-тесты на реальных моделях (`native_model_smoke`, `community_model_smoke`, `russian_engines_smoke`, `offline_conversion_real_audio_smoke`) по умолчанию помечены `#[ignore]` и запускаются с `-- --ignored` и переменными окружения `DIARIZATION_MODELS_DIR`, `COMMUNITY_MODELS_DIR`, `RUSSIAN_ASR_MODELS_DIR`, `DIARIZATION_AUDIO_FILE`, `RUSSIAN_ASR_AUDIO_FILE`, `MEETILY_RESAMPLING_AUDIO`.
+Smoke-тесты на реальных моделях (`native_model_smoke`, `community_model_smoke`, `russian_engines_smoke`, `offline_conversion_real_audio_smoke`, `vad_engines_real_audio_smoke`) по умолчанию помечены `#[ignore]` и запускаются с `-- --ignored` и переменными окружения `DIARIZATION_MODELS_DIR`, `COMMUNITY_MODELS_DIR`, `RUSSIAN_ASR_MODELS_DIR`, `DIARIZATION_AUDIO_FILE`, `RUSSIAN_ASR_AUDIO_FILE`, `MEETILY_RESAMPLING_AUDIO`, `MEETILY_VAD_AUDIO_FILE`.
 
 ---
 
@@ -328,6 +331,7 @@ MIT License - Feel free to use this project for your own purposes.
 - Thanks to [istupakov](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx) for providing the **ONNX conversion** of the Parakeet model.
 - Thanks to **SaluteDevices** for [GigaAM](https://github.com/salute-developers/GigaAM) and **T-Technologies** for the **T-one** Russian ASR model.
 - Speaker diarization uses [pyannote Community-1](https://huggingface.co/pyannote/speaker-diarization-community-1) (CC-BY-4.0) via [speakrs](https://github.com/avencera/speakrs) (Apache-2.0, ONNX conversions from [avencera/speakrs-models](https://huggingface.co/avencera/speakrs-models)) and [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx).
+- Voice activity detection uses [Silero VAD](https://github.com/snakers4/silero-vad) v6.2 (MIT) via [silero](https://github.com/Findit-AI/silero) and [Earshot](https://github.com/pykeio/earshot) (MIT/Apache-2.0).
 
 ## Star History
 
