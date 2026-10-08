@@ -45,6 +45,13 @@ export function AsrLiveBridge() {
       typeof window !== "undefined" &&
       localStorage.getItem("asrEngineGigaam") !== "false";
     const port = parseInt(localStorage.getItem("asrServicePort") || "8765", 10);
+    // Resend the saved diarization settings: Rust treats an omitted token as a reset.
+    const diarizationEnabled =
+      localStorage.getItem("asrDiarizationEnabled") === "true";
+    const diarizationMode =
+      localStorage.getItem("asrDiarizationMode") || "energy";
+    const diarizationToken =
+      localStorage.getItem("asrDiarizationToken") || null;
 
     const syncConfig = async () => {
       await invoke("set_asr_gateway_config", {
@@ -52,6 +59,9 @@ export function AsrLiveBridge() {
         port: Number.isFinite(port) ? port : 8765,
         tOneEnabled,
         gigaamEnabled,
+        diarizationEnabled,
+        diarizationMode,
+        diarizationToken,
       });
     };
 

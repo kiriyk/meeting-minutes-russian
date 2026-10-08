@@ -43,6 +43,7 @@ pub mod audio;
 pub mod config;
 pub mod console_utils;
 pub mod database;
+pub mod diarization;
 pub mod groq;
 pub mod notifications;
 pub mod ollama;
@@ -583,10 +584,10 @@ pub fn run() {
             ) {
                 Ok(runtime_path) => {
                     match catch_onnx_runtime_init(|| {
-                        ort::init_from(runtime_path.to_string_lossy().into_owned())
-                            .with_telemetry(false)
-                            .commit()
-                            .map(|_| ())
+                        ort::init_from(runtime_path.to_string_lossy().into_owned()).map(|builder| {
+                            // `false` only means an environment already exists; the DLL is loaded either way.
+                            let _ = builder.with_telemetry(false).commit();
+                        })
                     }) {
                         Ok(()) => log::info!(
                             "Initialized bundled ONNX Runtime from {}",
@@ -935,6 +936,8 @@ pub fn run() {
             audio::recording_preferences::get_audio_backend_info,
             // Language preference commands
             set_language_preference,
+            audio::vad::engine::set_vad_engine,
+            audio::vad::engine::get_vad_engine,
             set_asr_gateway_config,
             get_asr_gateway_config,
             get_asr_gateway_service_status,
@@ -986,6 +989,9 @@ pub fn run() {
             utils::open_system_settings,
             // Retranscription commands
             audio::retranscription::start_retranscription_command,
+            diarization::diarization_get_model_status,
+            diarization::diarization_download_models,
+            diarization::diarization_cancel_download,
             audio::retranscription::cancel_retranscription_command,
             audio::retranscription::is_retranscription_in_progress_command,
             // Import audio commands

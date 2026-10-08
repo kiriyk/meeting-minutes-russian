@@ -91,3 +91,5 @@ asr-service/recordings/
 
 # agent ignore
 .agent/
+# Local research and implementation notes
+/docs/

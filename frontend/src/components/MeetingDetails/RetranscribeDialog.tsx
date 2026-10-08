@@ -1,5 +1,13 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { RefreshCw, Globe, Loader2, AlertCircle, CheckCircle2, X, Cpu } from 'lucide-react';
+import React, { useState, useEffect, useRef, useMemo } from "react";
+import {
+  RefreshCw,
+  Globe,
+  Loader2,
+  AlertCircle,
+  X,
+  Cpu,
+  Download,
+} from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -7,22 +15,25 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '../ui/dialog';
-import { Button } from '../ui/button';
+} from "../ui/dialog";
+import { Button } from "../ui/button";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from '../ui/select';
-import { invoke } from '@tauri-apps/api/core';
-import { listen, UnlistenFn } from '@tauri-apps/api/event';
-import { toast } from 'sonner';
-import { useConfig } from '@/contexts/ConfigContext';
-import { LANGUAGES } from '@/constants/languages';
-import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
-import Analytics from '@/lib/analytics';
+} from "../ui/select";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, UnlistenFn } from "@tauri-apps/api/event";
+import { toast } from "sonner";
+import { useConfig } from "@/contexts/ConfigContext";
+import { LANGUAGES } from "@/constants/languages";
+import {
+  useTranscriptionModels,
+  RETRANSCRIPTION_PROVIDERS,
+} from "@/hooks/useTranscriptionModels";
+import Analytics from "@/lib/analytics";
 
 interface RetranscribeDialogProps {
   open: boolean;
@@ -31,25 +42,32 @@ interface RetranscribeDialogProps {
   meetingFolderPath: string | null;
   onComplete?: () => void;
 }
-
 interface RetranscriptionProgress {
   meeting_id: string;
   stage: string;
   progress_percentage: number;
   message: string;
 }
-
 interface RetranscriptionResult {
   meeting_id: string;
   segments_count: number;
   duration_seconds: number;
-  language: string | null;
+  warnings?: string[];
 }
-
-interface RetranscriptionError {
-  meeting_id: string;
-  error: string;
+interface ModelStatus {
+  available: boolean;
+  downloading: boolean;
+  progress: number;
+  active_download?: DiarizationModel | null;
 }
+type DiarizationModel = "community-1" | "legacy";
+interface SpeakerDownloadEvent {
+  model: DiarizationModel;
+  progress?: number;
+  error?: string;
+}
+const errorMessage = (error: unknown) =>
+  error instanceof Error ? error.message : String(error);
 
 export function RetranscribeDialog({
   open,
@@ -60,11 +78,23 @@ export function RetranscribeDialog({
 }: RetranscribeDialogProps) {
   const { selectedLanguage, transcriptModelConfig } = useConfig();
   const [isProcessing, setIsProcessing] = useState(false);
-  const [progress, setProgress] = useState<RetranscriptionProgress | null>(null);
+  const [cancellationRequested, setCancellationRequested] = useState(false);
+  const [listenersReady, setListenersReady] = useState(false);
+  const [progress, setProgress] = useState<RetranscriptionProgress | null>(
+    null,
+  );
   const [error, setError] = useState<string | null>(null);
-  const [selectedLang, setSelectedLang] = useState(selectedLanguage || 'auto');
-
-  // Use centralized model fetching hook
+  const [selectedLang, setSelectedLang] = useState(selectedLanguage || "auto");
+  const [diarizationEnabled, setDiarizationEnabled] = useState(true);
+  const [diarizationModel, setDiarizationModel] =
+    useState<DiarizationModel>("community-1");
+  const diarizationModelRef = useRef(diarizationModel);
+  diarizationModelRef.current = diarizationModel;
+  const [speakerModels, setSpeakerModels] = useState<ModelStatus | null>(null);
+  const [activeDownload, setActiveDownload] = useState<DiarizationModel | null>(
+    null,
+  );
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const {
     availableModels,
     selectedModelKey,
@@ -72,356 +102,528 @@ export function RetranscribeDialog({
     loadingModels,
     fetchModels,
     resetSelection,
-  } = useTranscriptionModels(transcriptModelConfig);
-
-  // Stable refs for callbacks to avoid listener re-registration
+  } = useTranscriptionModels(transcriptModelConfig, RETRANSCRIPTION_PROVIDERS);
   const onCompleteRef = useRef(onComplete);
   const onOpenChangeRef = useRef(onOpenChange);
-  useEffect(() => { onCompleteRef.current = onComplete; }, [onComplete]);
-  useEffect(() => { onOpenChangeRef.current = onOpenChange; }, [onOpenChange]);
-
-  // Track previous open state to only reset on closed→open transition
-  const prevOpenRef = useRef(false);
-
-  // Helper to get selected model details (memoized)
-  const selectedModelDetails = useMemo((): ModelOption | undefined => {
-    if (!selectedModelKey) return undefined;
-    const colonIndex = selectedModelKey.indexOf(':');
-    if (colonIndex === -1) return undefined;
-    const provider = selectedModelKey.slice(0, colonIndex);
-    const name = selectedModelKey.slice(colonIndex + 1);
-    return availableModels.find(m => m.provider === provider && m.name === name);
-  }, [selectedModelKey, availableModels]);
-  const isParakeetModel = selectedModelDetails?.provider === 'parakeet';
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+  }, [onComplete]);
+  useEffect(() => {
+    onOpenChangeRef.current = onOpenChange;
+  }, [onOpenChange]);
+  const previousOpen = useRef(false);
+  const selectedModel = useMemo(
+    () =>
+      availableModels.find(
+        (m) => `${m.provider}:${m.name}` === selectedModelKey,
+      ),
+    [availableModels, selectedModelKey],
+  );
+  const isRussianModel =
+    selectedModel?.provider === "gigaam" || selectedModel?.provider === "tone";
+  const isParakeetModel = selectedModel?.provider === "parakeet";
+  const canStart =
+    !!meetingFolderPath &&
+    !!selectedModel &&
+    !loadingModels &&
+    listenersReady &&
+    !isProcessing;
 
   useEffect(() => {
-    if (isParakeetModel && selectedLang !== 'auto') {
-      setSelectedLang('auto');
-    }
-  }, [isParakeetModel, selectedLang]);
-
-  // Reset state only when dialog transitions from closed to open
-  // This prevents re-initialization when config changes while dialog is already open
-  useEffect(() => {
-    const wasOpen = prevOpenRef.current;
-    prevOpenRef.current = open;
-
+    const wasOpen = previousOpen.current;
+    previousOpen.current = open;
     if (open && !wasOpen) {
       resetSelection();
-      setIsProcessing(false);
-      setProgress(null);
       setError(null);
-      setSelectedLang(selectedLanguage || 'auto');
-
-      // Fetch available models using centralized hook
-      fetchModels();
+      setProgress(null);
+      setCancellationRequested(false);
+      setSelectedLang(selectedLanguage || "auto");
+      void fetchModels();
     }
-  }, [open, selectedLanguage, transcriptModelConfig, fetchModels]);
+  }, [open, fetchModels, resetSelection, selectedLanguage]);
 
-  // Listen for retranscription events
   useEffect(() => {
     if (!open) return;
-
+    let disposed = false;
+    let downloadEventVersion = 0;
+    let activeDownloadEventVersion = 0;
     const unlisteners: UnlistenFn[] = [];
-    const cleanedUpRef = { current: false };
-
-    const setupListeners = async () => {
-      // Progress events
-      const unlistenProgress = await listen<RetranscriptionProgress>(
-        'retranscription-progress',
-        (event) => {
-          if (event.payload.meeting_id === meetingId) {
-            setProgress(event.payload);
-          }
-        }
-      );
-      if (cleanedUpRef.current) {
-        unlistenProgress();
-        return;
-      }
-      unlisteners.push(unlistenProgress);
-
-      // Completion event
-      const unlistenComplete = await listen<RetranscriptionResult>(
-        'retranscription-complete',
-        async (event) => {
-          if (event.payload.meeting_id === meetingId) {
-            await Analytics.track('enhance_transcript_completed', {
-              success: 'true',
-              duration_seconds: event.payload.duration_seconds.toString(),
-              segments_count: event.payload.segments_count.toString()
-            });
-
-            setIsProcessing(false);
-            toast.success(
-              `Retranscription complete! ${event.payload.segments_count} segments created.`
-            );
-            onCompleteRef.current?.();
-            onOpenChangeRef.current(false);
-          }
-        }
-      );
-      if (cleanedUpRef.current) {
-        unlistenComplete();
-        unlisteners.forEach(u => u());
-        return;
-      }
-      unlisteners.push(unlistenComplete);
-
-      // Error event
-      const unlistenError = await listen<RetranscriptionError>(
-        'retranscription-error',
-        async (event) => {
-          if (event.payload.meeting_id === meetingId) {
-            await Analytics.trackError('enhance_transcript_failed', event.payload.error);
-
-            setIsProcessing(false);
-            setError(event.payload.error);
-          }
-        }
-      );
-      if (cleanedUpRef.current) {
-        unlistenError();
-        unlisteners.forEach(u => u());
-        return;
-      }
-      unlisteners.push(unlistenError);
+    setListenersReady(false);
+    const register = async <T,>(
+      name: string,
+      handler: (payload: T) => void,
+    ) => {
+      const unlisten = await listen<T>(name, (event) => {
+        if (!disposed) handler(event.payload);
+      });
+      if (disposed) unlisten();
+      else unlisteners.push(unlisten);
     };
-
-    setupListeners();
-
+    const setup = async () => {
+      await register<RetranscriptionProgress>(
+        "retranscription-progress",
+        (payload) => {
+          if (payload.meeting_id === meetingId) setProgress(payload);
+        },
+      );
+      await register<RetranscriptionResult>(
+        "retranscription-complete",
+        (payload) => {
+          if (payload.meeting_id !== meetingId) return;
+          setIsProcessing(false);
+          setCancellationRequested(false);
+          toast.success(
+            `Retranscription complete! ${payload.segments_count} segments created.`,
+          );
+          payload.warnings?.forEach((warning) => toast.warning(warning));
+          onCompleteRef.current?.();
+          onOpenChangeRef.current(false);
+          void Analytics.track("enhance_transcript_completed", {
+            success: "true",
+            duration_seconds: String(payload.duration_seconds),
+            segments_count: String(payload.segments_count),
+          }).catch(console.error);
+        },
+      );
+      await register<{ meeting_id: string; error: string }>(
+        "retranscription-error",
+        (payload) => {
+          if (payload.meeting_id !== meetingId) return;
+          setIsProcessing(false);
+          setCancellationRequested(false);
+          if (payload.error === "Retranscription cancelled") {
+            toast.info(
+              "Retranscription cancelled. Existing transcript preserved.",
+            );
+            onOpenChangeRef.current(false);
+          } else {
+            setError(payload.error);
+            void Analytics.trackError(
+              "enhance_transcript_failed",
+              payload.error,
+            ).catch(console.error);
+          }
+        },
+      );
+      await register<SpeakerDownloadEvent>(
+        "diarization-model-download-progress",
+        (payload) => {
+          activeDownloadEventVersion++;
+          setActiveDownload(payload.model);
+          if (payload.model !== diarizationModel) {
+            setSpeakerModels((status) =>
+              status ? { ...status, active_download: payload.model } : status,
+            );
+            return;
+          }
+          downloadEventVersion++;
+          setSpeakerModels({
+            available: false,
+            downloading: true,
+            progress: payload.progress ?? 0,
+            active_download: payload.model,
+          });
+        },
+      );
+      await register<SpeakerDownloadEvent>(
+        "diarization-model-download-complete",
+        (payload) => {
+          activeDownloadEventVersion++;
+          setActiveDownload((active) =>
+            active === payload.model ? null : active,
+          );
+          if (payload.model !== diarizationModel) {
+            setSpeakerModels((status) =>
+              status ? { ...status, active_download: null } : status,
+            );
+            return;
+          }
+          downloadEventVersion++;
+          setSpeakerModels({
+            available: true,
+            downloading: false,
+            progress: 100,
+          });
+          setDownloadError(null);
+        },
+      );
+      await register<SpeakerDownloadEvent>(
+        "diarization-model-download-error",
+        (payload) => {
+          activeDownloadEventVersion++;
+          setActiveDownload((active) =>
+            active === payload.model ? null : active,
+          );
+          if (payload.model !== diarizationModel) {
+            setSpeakerModels((status) =>
+              status ? { ...status, active_download: null } : status,
+            );
+            return;
+          }
+          downloadEventVersion++;
+          setSpeakerModels({
+            available: false,
+            downloading: false,
+            progress: 0,
+          });
+          setDownloadError(payload.error ?? "Speaker model download failed");
+        },
+      );
+      if (disposed) return;
+      setListenersReady(true);
+      // Query after listeners are registered so completion during opening cannot be lost.
+      try {
+        const queryVersion = downloadEventVersion;
+        const activeQueryVersion = activeDownloadEventVersion;
+        const status = await invoke<ModelStatus>(
+          "diarization_get_model_status",
+          { model: diarizationModel },
+        );
+        if (!disposed && queryVersion === downloadEventVersion)
+          setSpeakerModels(status);
+        if (!disposed && activeQueryVersion === activeDownloadEventVersion)
+          setActiveDownload(status.active_download ?? null);
+      } catch (err) {
+        if (!disposed) setDownloadError(errorMessage(err));
+      }
+    };
+    void setup().catch((err) => {
+      if (!disposed)
+        setError(`Cannot subscribe to progress: ${errorMessage(err)}`);
+    });
     return () => {
-      cleanedUpRef.current = true;
+      disposed = true;
       unlisteners.forEach((unlisten) => unlisten());
     };
-  }, [open, meetingId]);
+  }, [open, meetingId, diarizationModel]);
 
-  const handleStartRetranscription = async () => {
-    if (!meetingFolderPath) {
-      setError('Meeting folder path not available');
-      return;
-    }
-
+  const handleStart = async () => {
+    if (!canStart || !selectedModel) return;
     setIsProcessing(true);
+    setCancellationRequested(false);
     setError(null);
     setProgress(null);
-
+    const language = isRussianModel
+      ? "ru"
+      : isParakeetModel || selectedLang === "auto"
+        ? null
+        : selectedLang;
+    void Analytics.track("enhance_transcript_started", {
+      language: language || "auto",
+      model_provider: selectedModel.provider,
+      model_name: selectedModel.name,
+    }).catch(console.error);
     try {
-      const languageToSend = isParakeetModel ? null : selectedLang === 'auto' ? null : selectedLang;
-      await Analytics.track('enhance_transcript_started', {
-        language: isParakeetModel ? 'auto' : (selectedLang === 'auto' ? 'auto' : selectedLang),
-        model_provider: selectedModelDetails?.provider || '',
-        model_name: selectedModelDetails?.name || ''
-      });
-
-      await invoke('start_retranscription_command', {
+      await invoke("start_retranscription_command", {
         meetingId,
         meetingFolderPath,
-        language: languageToSend,
-        model: selectedModelDetails?.name || null,
-        provider: selectedModelDetails?.provider || null,
+        language,
+        model: selectedModel.name,
+        provider: selectedModel.provider,
+        diarizationEnabled,
+        diarizationModel,
       });
-    } catch (err: any) {
+    } catch (err) {
       setIsProcessing(false);
-      const errorMsg = typeof err === 'string' ? err : (err?.message || String(err));
-      setError(errorMsg);
-
-      await Analytics.trackError('enhance_transcript_failed', errorMsg);
+      setError(errorMessage(err));
     }
   };
-
   const handleCancel = async () => {
-    if (isProcessing) {
-      try {
-        await invoke('cancel_retranscription_command');
-        setIsProcessing(false);
-        setProgress(null);
-        toast.info('Retranscription cancelled');
-      } catch (err) {
-        console.error('Failed to cancel retranscription:', err);
-      }
-    }
-    onOpenChange(false);
-  };
-
-  // Prevent closing during processing
-  const handleOpenChange = (newOpen: boolean) => {
-    if (!newOpen && isProcessing) {
+    if (!isProcessing) {
+      onOpenChange(false);
       return;
     }
-    onOpenChange(newOpen);
-  };
-
-  const handleEscapeKeyDown = (event: KeyboardEvent) => {
-    if (isProcessing) {
-      event.preventDefault();
+    setCancellationRequested(true);
+    try {
+      await invoke("cancel_retranscription_command");
+    } catch (err) {
+      setCancellationRequested(false);
+      toast.error(errorMessage(err));
     }
   };
-
-  const handleInteractOutside = (event: Event) => {
-    if (isProcessing) {
-      event.preventDefault();
+  const handleDownload = async () => {
+    setDownloadError(null);
+    setSpeakerModels({ available: false, downloading: true, progress: 0 });
+    setActiveDownload(diarizationModel);
+    try {
+      await invoke("diarization_download_models", { model: diarizationModel });
+      if (diarizationModelRef.current !== diarizationModel) return;
+      setActiveDownload((active) =>
+        active === diarizationModel ? null : active,
+      );
+      setSpeakerModels({ available: true, downloading: false, progress: 100 });
+    } catch (err) {
+      if (diarizationModelRef.current !== diarizationModel) return;
+      setActiveDownload((active) =>
+        active === diarizationModel ? null : active,
+      );
+      setSpeakerModels({ available: false, downloading: false, progress: 0 });
+      setDownloadError(errorMessage(err));
     }
   };
 
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!isProcessing) onOpenChange(next);
+      }}
+    >
       <DialogContent
         className="sm:max-w-[450px]"
-        onEscapeKeyDown={handleEscapeKeyDown}
-        onInteractOutside={handleInteractOutside}
+        onEscapeKeyDown={(event) => {
+          if (isProcessing) event.preventDefault();
+        }}
+        onInteractOutside={(event) => {
+          if (isProcessing) event.preventDefault();
+        }}
       >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {isProcessing ? (
-              <>
-                <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
-                Retranscribing...
-              </>
+              <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
             ) : error ? (
-              <>
-                <AlertCircle className="h-5 w-5 text-red-600" />
-                Retranscription Failed
-              </>
+              <AlertCircle className="h-5 w-5 text-red-600" />
             ) : (
-              <>
-                <RefreshCw className="h-5 w-5 text-blue-600" />
-                Retranscribe Meeting
-              </>
+              <RefreshCw className="h-5 w-5 text-blue-600" />
             )}
+            {isProcessing
+              ? "Retranscribing..."
+              : error
+                ? "Retranscription Failed"
+                : "Retranscribe Meeting"}
           </DialogTitle>
           <DialogDescription>
             {isProcessing
-              ? progress?.message || 'Processing audio...'
-              : error
-                ? 'An error occurred during retranscription'
-                : 'Re-process the audio with different language settings'}
+              ? cancellationRequested
+                ? "Cancellation requested. Waiting for the current processing step to finish..."
+                : progress?.message || "Processing audio..."
+              : "Re-process saved audio with a different model and identify speakers."}
           </DialogDescription>
         </DialogHeader>
-
         <div className="space-y-4 py-4">
           {!isProcessing && !error && (
-            !isParakeetModel ? (
+            <>
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
-                  <Globe className="h-4 w-4 text-muted-foreground" />
-                  <span className="text-sm font-medium">Language</span>
+                  <Cpu className="h-4 w-4 text-muted-foreground" />
+                  <span className="text-sm font-medium">Model</span>
                 </div>
-                <Select value={selectedLang} onValueChange={setSelectedLang}>
+                <Select
+                  value={selectedModelKey}
+                  onValueChange={setSelectedModelKey}
+                  disabled={loadingModels}
+                >
                   <SelectTrigger className="w-full">
-                    <SelectValue placeholder="Select language" />
+                    <SelectValue
+                      placeholder={
+                        loadingModels ? "Loading models..." : "Select model"
+                      }
+                    />
                   </SelectTrigger>
-                  <SelectContent className="max-h-60">
-                    {LANGUAGES.map((lang) => (
-                      <SelectItem key={lang.code} value={lang.code}>
-                        {lang.name}
+                  <SelectContent>
+                    {availableModels.map((model) => (
+                      <SelectItem
+                        key={`${model.provider}:${model.name}`}
+                        value={`${model.provider}:${model.name}`}
+                      >
+                        {model.displayName} ({Math.round(model.size_mb)} MB)
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
-                <p className="text-xs text-muted-foreground">
-                  Select a specific language to improve accuracy, or use auto-detect
-                </p>
+                {!loadingModels && availableModels.length === 0 && (
+                  <p className="text-sm text-muted-foreground">
+                    Download a Whisper, Parakeet, GigaAM or T-one model in
+                    Settings before starting.
+                  </p>
+                )}
               </div>
-            ) : (
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
                   <Globe className="h-4 w-4 text-muted-foreground" />
                   <span className="text-sm font-medium">Language</span>
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  Language selection isn't supported for Parakeet. It always uses automatic detection.
-                </p>
+                {isRussianModel ? (
+                  <p className="text-xs text-muted-foreground">
+                    GigaAM and T-one recognize Russian.
+                  </p>
+                ) : isParakeetModel ? (
+                  <p className="text-xs text-muted-foreground">
+                    Parakeet detects the language automatically.
+                  </p>
+                ) : (
+                  <Select value={selectedLang} onValueChange={setSelectedLang}>
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="Select language" />
+                    </SelectTrigger>
+                    <SelectContent className="max-h-60">
+                      {LANGUAGES.map((lang) => (
+                        <SelectItem key={lang.code} value={lang.code}>
+                          {lang.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
               </div>
-            )
-          )}
-
-          {!isProcessing && !error && availableModels.length > 0 && (
-            <div className="space-y-3">
-              <div className="flex items-center gap-2">
-                <Cpu className="h-4 w-4 text-muted-foreground" />
-                <span className="text-sm font-medium">Model</span>
+              <div className="space-y-2 rounded-lg border p-3">
+                <label className="flex items-center gap-2 text-sm font-medium">
+                  <input
+                    type="checkbox"
+                    checked={diarizationEnabled}
+                    onChange={(event) =>
+                      setDiarizationEnabled(event.target.checked)
+                    }
+                  />
+                  Identify speakers
+                </label>
+                {diarizationEnabled && (
+                  <>
+                    <label
+                      htmlFor="diarization-model"
+                      className="text-xs font-medium"
+                    >
+                      Speaker model
+                    </label>
+                    <Select
+                      value={diarizationModel}
+                      onValueChange={(value) => {
+                        setSpeakerModels(null);
+                        setDownloadError(null);
+                        setDiarizationModel(value as DiarizationModel);
+                      }}
+                    >
+                      <SelectTrigger id="diarization-model">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="community-1">
+                          pyannote Community-1 (recommended)
+                        </SelectItem>
+                        <SelectItem value="legacy">
+                          Pyannote + TitaNet (legacy)
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      {diarizationModel === "community-1"
+                        ? "pyannote speaker-diarization-community-1 via speakrs. About 60 MB. Runs locally on CPU and detects speech and speakers together."
+                        : "About 44 MB. Runs locally on CPU with separate speech detection."}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {speakerModels?.available
+                        ? "Speaker models are ready. Speakers will be labeled across the entire recording."
+                        : "Without speaker models, text and timestamps will still be transcribed, with a warning."}
+                    </p>
+                    {!speakerModels?.available &&
+                      (speakerModels?.downloading ? (
+                        <div className="flex items-center justify-between gap-2 text-xs">
+                          <span>
+                            Downloading speaker models: {speakerModels.progress}
+                            %
+                          </span>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => {
+                              void invoke("diarization_cancel_download", {
+                                model: diarizationModel,
+                              }).catch((err) =>
+                                setDownloadError(errorMessage(err)),
+                              );
+                            }}
+                          >
+                            Cancel download
+                          </Button>
+                        </div>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={
+                            !listenersReady ||
+                            speakerModels === null ||
+                            !!activeDownload
+                          }
+                          onClick={handleDownload}
+                        >
+                          <Download className="mr-2 h-4 w-4" />
+                          Download speaker models
+                        </Button>
+                      ))}
+                    {downloadError && (
+                      <p className="text-xs text-red-700">{downloadError}</p>
+                    )}
+                  </>
+                )}
               </div>
-              <Select value={selectedModelKey} onValueChange={setSelectedModelKey} disabled={loadingModels}>
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder={loadingModels ? "Loading models..." : "Select model"} />
-                </SelectTrigger>
-                <SelectContent>
-                  {availableModels.map((model) => (
-                    <SelectItem key={`${model.provider}:${model.name}`} value={`${model.provider}:${model.name}`}>
-                      {model.displayName} ({Math.round(model.size_mb)} MB)
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                Choose a transcription model
-              </p>
-            </div>
+            </>
           )}
-
           {isProcessing && progress && (
             <div className="space-y-2">
-              <div className="relative">
-                <div className="w-full bg-gray-200 rounded-full h-3">
-                  <div
-                    className="bg-blue-600 h-3 rounded-full transition-all duration-300 ease-out"
-                    style={{ width: `${Math.min(progress.progress_percentage, 100)}%` }}
-                  />
-                </div>
-                <div className="flex justify-between text-xs text-gray-600 mt-1">
-                  <span>{progress.stage}</span>
-                  <span>{Math.round(progress.progress_percentage)}%</span>
-                </div>
+              <div className="w-full bg-gray-200 rounded-full h-3">
+                <div
+                  className="bg-blue-600 h-3 rounded-full transition-all"
+                  style={{
+                    width: `${Math.min(progress.progress_percentage, 100)}%`,
+                  }}
+                />
               </div>
-              <p className="text-sm text-muted-foreground text-center">
-                {progress.message}
-              </p>
+              <div className="flex justify-between text-xs text-gray-600">
+                <span>{progress.stage}</span>
+                <span>{progress.progress_percentage}%</span>
+              </div>
             </div>
           )}
-
           {error && (
             <div className="bg-red-50 border border-red-200 rounded-lg p-3">
               <p className="text-sm text-red-800">{error}</p>
             </div>
           )}
         </div>
-
         <DialogFooter>
-          {!isProcessing && !error && (
-            <>
-              <Button variant="outline" onClick={() => onOpenChange(false)}>
-                Cancel
-              </Button>
-              <Button
-                onClick={handleStartRetranscription}
-                className="bg-blue-600 hover:bg-blue-700"
-                disabled={!meetingFolderPath}
-              >
-                <RefreshCw className="h-4 w-4 mr-2" />
-                Start Retranscription
-              </Button>
-            </>
-          )}
-          {isProcessing && (
-            <Button variant="outline" onClick={handleCancel}>
+          {isProcessing ? (
+            <Button
+              variant="outline"
+              onClick={handleCancel}
+              disabled={
+                cancellationRequested ||
+                progress?.stage === "saving" ||
+                progress?.stage === "complete"
+              }
+            >
               <X className="h-4 w-4 mr-2" />
-              Cancel
+              {cancellationRequested ? "Cancellation requested" : "Cancel"}
             </Button>
-          )}
-          {error && (
+          ) : error ? (
             <>
               <Button variant="outline" onClick={() => onOpenChange(false)}>
                 Close
               </Button>
               <Button
+                variant="outline"
                 onClick={() => {
                   setError(null);
                   setProgress(null);
+                  void fetchModels();
                 }}
-                variant="outline"
               >
                 Try Again
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button variant="outline" onClick={handleCancel}>
+                Cancel
+              </Button>
+              <Button
+                onClick={handleStart}
+                className="bg-blue-600 hover:bg-blue-700"
+                disabled={!canStart}
+              >
+                <RefreshCw className="h-4 w-4 mr-2" />
+                Start Retranscription
               </Button>
             </>
           )}

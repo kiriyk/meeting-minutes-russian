@@ -4,6 +4,16 @@ mod ffmpeg;
 mod onnxruntime;
 
 fn main() {
+    // Catch ONNX C++ exceptions before they cross the C ABI into Rust.
+    println!("cargo:rerun-if-changed=src/diarization/safe_ffi.cpp");
+    let mut shim = cc::Build::new();
+    shim.cpp(true).file("src/diarization/safe_ffi.cpp");
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        shim.flag("/EHsc");
+    } else {
+        shim.flag("-fexceptions");
+    }
+    shim.compile("meetily_diarization_ffi");
     // GPU Acceleration Detection and Build Guidance
     detect_and_report_gpu_capabilities();
 
