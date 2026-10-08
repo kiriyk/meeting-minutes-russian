@@ -28,6 +28,15 @@ use super::vad::{ContinuousVadProcessor};
 /// during continuous speech is tracked separately in #756.
 const VAD_REDEMPTION_TIME_MS: u32 = 900;
 
+/// Longest live segment handed to ASR while speech continues without a pause.
+///
+/// Without it, speech with no pause longer than the redemption time grows one
+/// segment until the speaker stops: its text appears only at the end, and GigaAM
+/// receives input far beyond the ~25s its authors support in `transcribe` (batch
+/// paths split at 25s for the same reason). 8s keeps live text within a sentence
+/// or two of the speaker while staying long enough for Whisper's context. #756.
+const LIVE_MAX_SEGMENT_MS: u32 = 8_000;
+
 /// Ring buffer for synchronized audio mixing
 /// Accumulates samples from mic and system streams until we have aligned windows
 struct AudioMixerRingBuffer {
@@ -785,11 +794,11 @@ impl AudioPipeline {
         // indefinitely and withheld live transcript emission, so live and batch
         // deliberately diverge. Bounded live segments under continuous speech
         // are tracked in #756.
-        let vad_processor =
-            ContinuousVadProcessor::new(sample_rate, VAD_REDEMPTION_TIME_MS)?;
+        let vad_processor = ContinuousVadProcessor::new(sample_rate, VAD_REDEMPTION_TIME_MS)?
+            .with_max_segment_ms(LIVE_MAX_SEGMENT_MS);
         info!(
-            "VAD-driven pipeline: segments dispatched per speech burst (redemption_time={}ms)",
-            VAD_REDEMPTION_TIME_MS
+            "VAD-driven pipeline: segments dispatched per speech burst (redemption_time={}ms, max_segment={}ms)",
+            VAD_REDEMPTION_TIME_MS, LIVE_MAX_SEGMENT_MS
         );
 
         // Initialize professional audio mixing components
@@ -1222,6 +1231,15 @@ mod tests {
         track_around(lead_s, &jfk, tail_s)
     }
 
+    /// `speech_s` of speech with no pause: the fixture's 0.3-2.2s span (one VAD
+    /// segment, so no pause there reaches the redemption time) looped back to back.
+    fn uninterrupted_speech_track(lead_s: f32, speech_s: f32, tail_s: f32) -> Vec<f32> {
+        let jfk = super::super::vad::test_audio::jfk_speech_16k();
+        let span = &jfk[4_800..35_200];
+        let speech: Vec<f32> = span.iter().copied().cycle().take((speech_s * 16_000.0) as usize).collect();
+        track_around(lead_s, &speech, tail_s)
+    }
+
     /// Silence, 16 kHz `speech` upsampled to 48 kHz by sample repetition, silence.
     fn track_around(lead_s: f32, speech_16k: &[f32], tail_s: f32) -> Vec<f32> {
         let silence = |s: f32| vec![0.0f32; (s * CAPTURE_RATE as f32) as usize];
@@ -1256,7 +1274,8 @@ mod tests {
         .unwrap();
         // Bypass the global engine setting so both engines can run in parallel tests.
         pipeline.vad_processor =
-            ContinuousVadProcessor::with_classifier(CAPTURE_RATE, VAD_REDEMPTION_TIME_MS, classifier);
+            ContinuousVadProcessor::with_classifier(CAPTURE_RATE, VAD_REDEMPTION_TIME_MS, classifier)
+                .with_max_segment_ms(LIVE_MAX_SEGMENT_MS);
         pipeline.recording_sender_for_mixed = Some(recording_tx);
         TestPipeline {
             audio: audio_tx,
@@ -1330,6 +1349,28 @@ mod tests {
             drop(p.audio);
             p.handle.await.unwrap().unwrap();
             assert_segments_cover_speech(name, &drain(&mut p.transcription), 1.0..5.0);
+            assert_recording_is_complete(name, &drain(&mut p.recording), &mic);
+        }
+    }
+
+    /// 20s of speech without a pause long enough to end a segment must still reach
+    /// ASR in pieces no longer than the live cap.
+    #[tokio::test]
+    async fn uninterrupted_speech_is_split_at_the_live_segment_cap() {
+        for (name, classifier) in engines() {
+            let mut p = start_pipeline(classifier);
+            let mic = uninterrupted_speech_track(1.0, 20.0, 2.0);
+            stream(&p.audio, &mic);
+            drop(p.audio);
+            p.handle.await.unwrap().unwrap();
+            let segments = drain(&mut p.transcription);
+            assert_segments_cover_speech(name, &segments, 1.0..21.0);
+            let cap_s = LIVE_MAX_SEGMENT_MS as f64 / 1000.0;
+            for s in &segments {
+                let len_s = s.data.len() as f64 / 16_000.0;
+                assert!(len_s <= cap_s, "{name}: {len_s:.2}s segment exceeds the {cap_s}s cap");
+            }
+            assert!(segments.len() >= 3, "{name}: 20s of speech came out as {} segments", segments.len());
             assert_recording_is_complete(name, &drain(&mut p.recording), &mic);
         }
     }

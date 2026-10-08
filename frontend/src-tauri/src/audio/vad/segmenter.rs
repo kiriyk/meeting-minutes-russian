@@ -70,6 +70,10 @@ pub struct SpeechSegmenter {
     /// End of the last emitted segment; later segments never start before it.
     floor: usize,
     state: State,
+    /// Longest segment emitted while speech continues; `None` waits for a pause.
+    max_speech: Option<usize>,
+    /// `(end_sample, probability)` of each frame since the open segment began.
+    frame_probs: Vec<(usize, f32)>,
 }
 
 impl SpeechSegmenter {
@@ -87,7 +91,15 @@ impl SpeechSegmenter {
             silent: 0,
             floor: 0,
             state: State::Silence,
+            max_speech: None,
+            frame_probs: Vec::new(),
         }
+    }
+
+    /// Caps segment length during uninterrupted speech. A segment reaching the cap is
+    /// cut after its quietest frame in the second half, and the next one starts there.
+    pub fn set_max_speech_ms(&mut self, max_ms: Option<u32>) {
+        self.max_speech = max_ms.map(ms_to_samples);
     }
 
     pub fn push_frame(&mut self, frame: &[f32], probability: f32) -> Option<RawSegment> {
@@ -131,11 +143,42 @@ impl SpeechSegmenter {
             }
         }
 
+        if matches!(self.state, State::Silence) {
+            self.frame_probs.clear();
+        } else {
+            self.frame_probs.push((after, probability));
+        }
+
+        if let (State::Speech { start }, Some(max)) = (self.state, self.max_speech) {
+            if after - start >= max {
+                emitted = Some(self.cut_long_segment(start, max, after));
+            }
+        }
+
         self.processed = after;
         if matches!(self.state, State::Silence) {
             self.trim();
         }
         emitted
+    }
+
+    fn cut_long_segment(&mut self, start: usize, max: usize, after: usize) -> RawSegment {
+        let earliest = start + max / 2;
+        // Lowest probability wins; among equals the latest frame keeps the piece longest.
+        let cut = self
+            .frame_probs
+            .iter()
+            .filter(|(end, _)| *end >= earliest)
+            .min_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
+            .map_or(after, |(end, _)| *end);
+        let segment = self.slice(start, cut);
+        self.floor = cut;
+        self.state = State::Speech { start: cut };
+        self.frame_probs.retain(|(end, _)| *end > cut);
+        let drop = cut - self.origin;
+        self.audio.drain(..drop);
+        self.origin = cut;
+        segment
     }
 
     pub fn finish(&mut self, real_end_sample: usize) -> Option<RawSegment> {
@@ -300,6 +343,60 @@ mod tests {
         assert_eq!(segments.len(), 1);
         assert!(segments[0].end_sample <= 46 * FRAME, "end {} beyond processed audio", segments[0].end_sample);
         assert_exact_payload(&segments[0]);
+    }
+
+    /// Feeds explicit per-frame probabilities.
+    fn run_probs(seg: &mut SpeechSegmenter, probs: &[f32], first_frame: usize) -> Vec<RawSegment> {
+        probs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| seg.push_frame(&frame_at(first_frame + i), *p))
+            .collect()
+    }
+
+    #[test]
+    fn continuous_speech_is_cut_into_contiguous_segments_within_the_limit() {
+        let mut seg = SpeechSegmenter::new(config());
+        seg.set_max_speech_ms(Some(1_000)); // 16000 samples = 100 frames
+        let mut segments = run(&mut seg, &pattern(&[(false, 20), (true, 450)]), 0);
+        assert!(segments.len() >= 4, "{} segments from 4.5s of speech", segments.len());
+        assert!(seg.is_speaking(), "the last piece stays open until speech ends");
+        segments.extend(seg.finish(470 * FRAME));
+
+        assert_eq!(segments[0].start_sample, 20 * FRAME - 1600);
+        assert_eq!(segments.last().unwrap().end_sample, 470 * FRAME);
+        for pair in segments.windows(2) {
+            assert_eq!(pair[1].start_sample, pair[0].end_sample, "pieces must be contiguous");
+        }
+        for s in &segments {
+            assert!(s.end_sample - s.start_sample <= 16_000, "piece of {} samples", s.end_sample - s.start_sample);
+            assert_exact_payload(s);
+        }
+    }
+
+    #[test]
+    fn long_segment_is_cut_after_its_quietest_frame_in_the_second_half() {
+        let mut seg = SpeechSegmenter::new(config());
+        seg.set_max_speech_ms(Some(1_000));
+        // Speech confirmed at frame 10 (start 0 after pre-pad saturates); dips at 30 and 70.
+        let mut probs = vec![0.9f32; 130];
+        probs[..10].fill(0.1);
+        probs[30] = 0.2; // quieter, but in the first half: too early to cut
+        probs[70] = 0.4; // quietest frame of the second half
+        let segments = run_probs(&mut seg, &probs, 0);
+        assert_eq!(segments.len(), 1);
+        assert_eq!((segments[0].start_sample, segments[0].end_sample), (0, 71 * FRAME));
+        assert_exact_payload(&segments[0]);
+        assert!(seg.is_speaking());
+    }
+
+    #[test]
+    fn pause_inside_limit_still_ends_segment_normally() {
+        let mut seg = SpeechSegmenter::new(config());
+        seg.set_max_speech_ms(Some(1_000));
+        let segments = run(&mut seg, &pattern(&[(false, 30), (true, 50), (false, 40)]), 0);
+        assert_eq!(segments.len(), 1);
+        assert_eq!((segments[0].start_sample, segments[0].end_sample), (30 * FRAME - 1600, 80 * FRAME + 800));
     }
 
     #[test]

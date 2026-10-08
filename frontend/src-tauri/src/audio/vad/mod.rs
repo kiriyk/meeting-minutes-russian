@@ -75,6 +75,12 @@ impl ContinuousVadProcessor {
         }
     }
 
+    /// Emits uninterrupted speech in pieces of at most `max_ms` instead of waiting for a pause.
+    pub fn with_max_segment_ms(mut self, max_ms: u32) -> Self {
+        self.segmenter.set_max_speech_ms(Some(max_ms));
+        self
+    }
+
     pub fn is_speaking(&self) -> bool {
         self.segmenter.is_speaking()
     }
