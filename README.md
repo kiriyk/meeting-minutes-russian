@@ -79,12 +79,14 @@ git merge vX.Y.Z
 
 ```bash
 cd frontend
+# SDK из Xcode: OpenBLAS не линкуется с более новым SDK из Command Line Tools (см. выше)
+SDKROOT=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk \
 TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/meetily-ru.key)" \
 TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(cat ~/.tauri/meetily-ru.key.password)" \
 pnpm run tauri:build
 ```
 
-В релиз `vX.Y.Z-N` загрузите `.dmg`, `.app.tar.gz`, `.app.tar.gz.sig` и `latest.json` (его читает автообновление).
+Затем `node scripts/make-latest-json.mjs` создаёт манифест автообновления `latest.json` рядом со сборкой (`target/release/bundle/macos/`). В релиз `vX.Y.Z-N` загрузите `.dmg`, `.app.tar.gz`, `.app.tar.gz.sig` и `latest.json`.
 ---
 
 <div align="center" style="border-bottom: none">
