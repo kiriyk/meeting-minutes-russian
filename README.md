@@ -1,3 +1,61 @@
+## 🇷🇺 About this fork
+
+This repository is a fork of [Meetily](https://github.com/Zackriya-Solutions/meeting-minutes) (based on v0.4.1), focused on **Russian-language meetings**. Everything still runs locally inside the Tauri app; no Python service is required for the features below.
+
+### Что добавлено в форке
+
+- **Русские ASR-модели.** Помимо Whisper и Parakeet доступен провайдер `russianAsr` с двумя нативными ONNX-движками на Rust:
+  - **GigaAM-v3** (e2e RNNT, SaluteDevices) — основная модель по умолчанию; препроцессинг log-mel совпадает с официальной конфигурацией v3.
+  - **T-one** (CTC, T-Technologies) — быстрая модель для потокового распознавания.
+
+  Модели скачиваются с Hugging Face ([GigaAM](https://huggingface.co/kiriyk/GigaAM-v3-onnx-rnnt-e2e), [T-one](https://huggingface.co/kiriyk/T-one-onnx-ctc)) при онбординге или в настройках транскрипции.
+- **Онбординг под русский язык.** При первом запуске основной ASR-моделью скачивается GigaAM.
+- **Нативная ретранскрибация (Enhance).** Сохранённую встречу можно заново распознать любой скачанной моделью (Whisper, Parakeet, GigaAM, T-one) с прогрессом, отменой и транзакционной заменой транскрипта: при отмене или ошибке прежний транскрипт сохраняется. Требуется включить beta-настройку Import & Retranscribe.
+- **Выбор VAD.** В настройках транскрипции можно выбрать детектор речи: **Silero VAD v6.2** (по умолчанию, ONNX) или **Earshot** (чистый Rust, без ONNX Runtime). Настройка действует на live-запись, импорт и ретранскрибацию; если ONNX Runtime недоступен, автоматически используется Earshot.
+- **Диаризация спикеров.** В диалоге ретранскрибации включена опция **Identify speakers** с выбором модели:
+  - **pyannote Community-1** (по умолчанию) — полный Rust-конвейер [pyannote Community-1](https://huggingface.co/pyannote/speaker-diarization-community-1) через [speakrs](https://github.com/avencera/speakrs) 0.5.0: segmentation 3.0, WeSpeaker, PLDA, VBx. ~60 МБ, CPU. Его сегментация заменяет отдельный VAD; отмена срабатывает до и после определения спикеров.
+  - **Pyannote + TitaNet (legacy)** — конвейер sherpa-onnx, ~44 МБ, с выбранным VAD.
+
+  Спикеры получают метки `SPEAKER_00`, `SPEAKER_01`, … в порядке появления; метки сохраняются в SQLite и `transcripts.json` и отображаются в транскрипте. Скачанные файлы проверяются по SHA-256. Если моделей нет или диаризация упала, текст распознаётся с выбранным VAD без меток спикеров с предупреждением.
+- **Живая запись.** Длинная речь без пауз уходит в распознавание кусками не длиннее 8 с (разрез в самом тихом месте), а не одним блоком после паузы; GigaAM больше не получает фрагменты длиннее, чем рассчитана модель. Микшер больше не вставляет тишину в системный звук и не теряет последние ~0,6 с при остановке. Запись с русскими моделями запускается без ложной ошибки «Transcription model not ready».
+- **Быстрый оффлайн-ресемплинг.** Файлы конвертируются потоковым FFT-ресемплером блоками, с прогрессом и отменой; длительность и таймкоды записи сохраняются.
+- **Пользовательские шаблоны саммари.** Шаблоны можно создавать, редактировать и удалять прямо в генераторе саммари; они хранятся в пользовательской папке рядом со встроенными.
+- **Опциональный ASR-шлюз** (`asr-service/`, экспериментально). Отдельный Python-сервис для live-распознавания через WebSocket; протокол описан в [docs/ASR_PROTOCOL.md](docs/ASR_PROTOCOL.md). Для основных сценариев не нужен.
+
+### Сборка форка
+
+Готовых релизов форка нет — собирайте из исходников (см. [docs/BUILDING.md](docs/BUILDING.md)):
+
+```bash
+git clone https://github.com/kiriyk/meeting-minutes-russian
+cd meeting-minutes-russian/frontend
+pnpm install --frozen-lockfile
+pnpm run tauri:dev      # или ./clean_run.sh на macOS
+```
+
+Требования сверх upstream:
+
+- **Rust 1.88+** и C++-компилятор с поддержкой исключений.
+- Линейная алгебра для PLDA (speakrs): статический Intel MKL на x86_64, статический OpenBLAS на остальных платформах (включая macOS arm64).
+- ONNX Runtime: `ort` 2.0.0-rc.12 (API 24); на Windows в сборку кладётся ONNX Runtime 1.24.4.
+- `sherpa-onnx-sys` 1.13.8 при первой сборке скачивает нативные библиотеки; для оффлайн-сборки задайте `SHERPA_ONNX_LIB_DIR` или `SHERPA_ONNX_ARCHIVE_DIR`.
+- На macOS OpenBLAS (speakrs, статически) линкуется с SDK, который возвращает `xcrun`; если Command Line Tools дают более новый SDK, чем понимает линкер Xcode, сборка падает с `unknown architecture arm64e...` — обновите Xcode/CLT до согласованных версий или явно возьмите SDK из Xcode: `export SDKROOT=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk`. Компилятор Fortran не нужен — OpenBLAS использует свой LAPACK на C.
+
+Тесты:
+
+```bash
+# из корня репозитория
+cargo test -p meetily --lib --locked         # Rust (часть тестов поднимает локальные HTTP-серверы)
+
+# из frontend/
+bun test tests                               # фронтенд
+pnpm exec tsc --noEmit --incremental false   # проверка типов
+```
+
+Smoke-тесты на реальных моделях (`native_model_smoke`, `community_model_smoke`, `russian_engines_smoke`, `offline_conversion_real_audio_smoke`, `vad_engines_real_audio_smoke`) по умолчанию помечены `#[ignore]` и запускаются с `-- --ignored` и переменными окружения `DIARIZATION_MODELS_DIR`, `COMMUNITY_MODELS_DIR`, `RUSSIAN_ASR_MODELS_DIR`, `DIARIZATION_AUDIO_FILE`, `RUSSIAN_ASR_AUDIO_FILE`, `MEETILY_RESAMPLING_AUDIO`, `MEETILY_VAD_AUDIO_FILE`.
+
+---
+
 <div align="center" style="border-bottom: none">
     <h1>
         <img src="docs/Meetily-6.png" style="border-radius: 10px;" />
@@ -45,63 +103,6 @@ A privacy-first AI meeting assistant that captures, transcribes, and summarizes 
 ---
 
 > **Meetily PRO Upgrade Offer** - Meetily PRO is available for users who need enhanced accuracy, advanced exports, custom summary workflows, and team-ready features. Use coupon code **LAUNCH20** for **20% off** until the next Meetily Community Edition release. Speaker diarization is also planned for PRO in mid-June. [Explore Meetily PRO →](https://meetily.ai/pro/)
-
----
-
-## 🇷🇺 About this fork
-
-This repository is a fork of [Meetily](https://github.com/Zackriya-Solutions/meeting-minutes) (based on v0.4.1), focused on **Russian-language meetings**. Everything still runs locally inside the Tauri app; no Python service is required for the features below.
-
-### Что добавлено в форке
-
-- **Русские ASR-модели.** Помимо Whisper и Parakeet доступен провайдер `russianAsr` с двумя нативными ONNX-движками на Rust:
-  - **GigaAM-v3** (e2e RNNT, SaluteDevices) — основная модель по умолчанию; препроцессинг log-mel совпадает с официальной конфигурацией v3.
-  - **T-one** (CTC, T-Technologies) — быстрая модель для потокового распознавания.
-
-  Модели скачиваются с Hugging Face ([GigaAM](https://huggingface.co/kiriyk/GigaAM-v3-onnx-rnnt-e2e), [T-one](https://huggingface.co/kiriyk/T-one-onnx-ctc)) при онбординге или в настройках транскрипции.
-- **Онбординг под русский язык.** При первом запуске основной ASR-моделью скачивается GigaAM.
-- **Нативная ретранскрибация (Enhance).** Сохранённую встречу можно заново распознать любой скачанной моделью (Whisper, Parakeet, GigaAM, T-one) с прогрессом, отменой и транзакционной заменой транскрипта: при отмене или ошибке прежний транскрипт сохраняется. Требуется включить beta-настройку Import & Retranscribe.
-- **Выбор VAD.** В настройках транскрипции можно выбрать детектор речи: **Silero VAD v6.2** (по умолчанию, ONNX) или **Earshot** (чистый Rust, без ONNX Runtime). Настройка действует на live-запись, импорт и ретранскрибацию; если ONNX Runtime недоступен, автоматически используется Earshot.
-- **Диаризация спикеров.** В диалоге ретранскрибации включена опция **Identify speakers** с выбором модели:
-  - **Community-1** (по умолчанию) — полный Rust-конвейер [pyannote Community-1](https://huggingface.co/pyannote/speaker-diarization-community-1) через [speakrs](https://github.com/avencera/speakrs) 0.5.0: segmentation 3.0, WeSpeaker, PLDA, VBx. ~60 МБ, CPU. Его сегментация заменяет отдельный VAD; отмена срабатывает до и после определения спикеров.
-  - **Pyannote + TitaNet (legacy)** — конвейер sherpa-onnx, ~44 МБ, с выбранным VAD.
-
-  Спикеры получают метки `SPEAKER_00`, `SPEAKER_01`, … в порядке появления; метки сохраняются в SQLite и `transcripts.json` и отображаются в транскрипте. Скачанные файлы проверяются по SHA-256. Если моделей нет или диаризация упала, текст распознаётся с выбранным VAD без меток спикеров с предупреждением.
-- **Быстрый оффлайн-ресемплинг.** Файлы конвертируются потоковым FFT-ресемплером блоками, с прогрессом и отменой; длительность и таймкоды записи сохраняются.
-- **Пользовательские шаблоны саммари.** Шаблоны можно создавать, редактировать и удалять прямо в генераторе саммари; они хранятся в пользовательской папке рядом со встроенными.
-- **Опциональный ASR-шлюз** (`asr-service/`, экспериментально). Отдельный Python-сервис для live-распознавания через WebSocket; протокол описан в [docs/ASR_PROTOCOL.md](docs/ASR_PROTOCOL.md). Для основных сценариев не нужен.
-
-### Сборка форка
-
-Готовых релизов форка нет — собирайте из исходников (см. [docs/BUILDING.md](docs/BUILDING.md)):
-
-```bash
-git clone https://github.com/kiriyk/meeting-minutes-russian
-cd meeting-minutes-russian/frontend
-pnpm install --frozen-lockfile
-pnpm run tauri:dev      # или ./clean_run.sh на macOS
-```
-
-Требования сверх upstream:
-
-- **Rust 1.88+** и C++-компилятор с поддержкой исключений.
-- Линейная алгебра для PLDA (speakrs): статический Intel MKL на x86_64, статический OpenBLAS на остальных платформах (включая macOS arm64).
-- ONNX Runtime: `ort` 2.0.0-rc.12 (API 24); на Windows в сборку кладётся ONNX Runtime 1.24.4.
-- `sherpa-onnx-sys` 1.13.8 при первой сборке скачивает нативные библиотеки; для оффлайн-сборки задайте `SHERPA_ONNX_LIB_DIR` или `SHERPA_ONNX_ARCHIVE_DIR`.
-- На macOS OpenBLAS (speakrs, статически) линкуется с SDK, который возвращает `xcrun`; если Command Line Tools дают более новый SDK, чем понимает линкер Xcode, сборка падает с `unknown architecture arm64e...` — обновите Xcode/CLT до согласованных версий или явно возьмите SDK из Xcode: `export SDKROOT=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk`. Компилятор Fortran не нужен — OpenBLAS использует свой LAPACK на C.
-
-Тесты:
-
-```bash
-# из корня репозитория
-cargo test -p meetily --lib --locked         # Rust (часть тестов поднимает локальные HTTP-серверы)
-
-# из frontend/
-bun test tests                               # фронтенд
-pnpm exec tsc --noEmit --incremental false   # проверка типов
-```
-
-Smoke-тесты на реальных моделях (`native_model_smoke`, `community_model_smoke`, `russian_engines_smoke`, `offline_conversion_real_audio_smoke`, `vad_engines_real_audio_smoke`) по умолчанию помечены `#[ignore]` и запускаются с `-- --ignored` и переменными окружения `DIARIZATION_MODELS_DIR`, `COMMUNITY_MODELS_DIR`, `RUSSIAN_ASR_MODELS_DIR`, `DIARIZATION_AUDIO_FILE`, `RUSSIAN_ASR_AUDIO_FILE`, `MEETILY_RESAMPLING_AUDIO`, `MEETILY_VAD_AUDIO_FILE`.
 
 ---
 
