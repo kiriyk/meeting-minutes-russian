@@ -499,7 +499,7 @@ export function RetranscribeDialog({
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="community-1">
-                          Community-1 (recommended)
+                          pyannote Community-1 (recommended)
                         </SelectItem>
                         <SelectItem value="legacy">
                           Pyannote + TitaNet (legacy)
@@ -508,7 +508,7 @@ export function RetranscribeDialog({
                     </Select>
                     <p className="text-xs text-muted-foreground">
                       {diarizationModel === "community-1"
-                        ? "About 60 MB. Runs locally on CPU and detects speech and speakers together."
+                        ? "pyannote speaker-diarization-community-1 via speakrs. About 60 MB. Runs locally on CPU and detects speech and speakers together."
                         : "About 44 MB. Runs locally on CPU with separate speech detection."}
                     </p>
                     <p className="text-xs text-muted-foreground">
