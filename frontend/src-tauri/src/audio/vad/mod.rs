@@ -4,6 +4,8 @@ use log::{debug, info, warn};
 pub mod classifier;
 pub mod engine;
 pub mod segmenter;
+#[cfg(test)]
+pub(crate) mod test_audio;
 
 use classifier::FrameClassifier;
 use segmenter::{RawSegment, SegmenterConfig, SpeechSegmenter, VAD_SAMPLE_RATE as VAD_RATE};
