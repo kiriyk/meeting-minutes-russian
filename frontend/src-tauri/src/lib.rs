@@ -45,6 +45,7 @@ pub mod console_utils;
 pub mod database;
 pub mod diarization;
 pub mod groq;
+pub mod legacy_data;
 pub mod notifications;
 pub mod ollama;
 pub mod onboarding;
@@ -577,6 +578,9 @@ pub fn run() {
             tokio::sync::Mutex::new(None),
         )))
         .setup(|_app| {
+            // Before anything resolves app_data_dir: bring data over from the upstream identifier.
+            legacy_data::migrate_app_data(&_app.handle());
+
             #[cfg(target_os = "windows")]
             match _app.path().resolve(
                 "onnxruntime.dll",

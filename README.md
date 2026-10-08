@@ -22,9 +22,17 @@ This repository is a fork of [Meetily](https://github.com/Zackriya-Solutions/mee
 - **Пользовательские шаблоны саммари.** Шаблоны можно создавать, редактировать и удалять прямо в генераторе саммари; они хранятся в пользовательской папке рядом со встроенными.
 - **Опциональный ASR-шлюз** (`asr-service/`, экспериментально). Отдельный Python-сервис для live-распознавания через WebSocket; протокол описан в [docs/ASR_PROTOCOL.md](docs/ASR_PROTOCOL.md). Для основных сценариев не нужен.
 
+### Установка
+
+Релизы форка — в [GitHub Releases](https://github.com/kiriyk/meeting-minutes-russian/releases): пока только macOS (Apple Silicon). Сборка подписана ad-hoc и не нотаризована, поэтому после переноса в «Программы» снимите карантин: `xattr -dr com.apple.quarantine /Applications/meetily-ru.app`.
+
+Форк ставится как отдельное приложение `meetily-ru` (идентификатор `ru.kiriyk.meetily`) и обновляется из релизов этого репозитория, а не upstream. При первом запуске встречи, модели и настройки из установленного Meetily (`com.meetily.ai`) переносятся в папку форка; настройки интерфейса из localStorage (например, выбор VAD) нужно выставить заново.
+
+Версии форка — версия upstream плюс номер сборки: `0.4.1-1`, `0.4.1-2`, после перехода на upstream 0.4.2 — `0.4.2-1`.
+
 ### Сборка форка
 
-Готовых релизов форка нет — собирайте из исходников (см. [docs/BUILDING.md](docs/BUILDING.md)):
+Из исходников (см. [docs/BUILDING.md](docs/BUILDING.md)):
 
 ```bash
 git clone https://github.com/kiriyk/meeting-minutes-russian
@@ -54,6 +62,29 @@ pnpm exec tsc --noEmit --incremental false   # проверка типов
 
 Smoke-тесты на реальных моделях (`native_model_smoke`, `community_model_smoke`, `russian_engines_smoke`, `offline_conversion_real_audio_smoke`, `vad_engines_real_audio_smoke`) по умолчанию помечены `#[ignore]` и запускаются с `-- --ignored` и переменными окружения `DIARIZATION_MODELS_DIR`, `COMMUNITY_MODELS_DIR`, `RUSSIAN_ASR_MODELS_DIR`, `DIARIZATION_AUDIO_FILE`, `RUSSIAN_ASR_AUDIO_FILE`, `MEETILY_RESAMPLING_AUDIO`, `MEETILY_VAD_AUDIO_FILE`.
 
+
+### Как влить новую версию upstream
+
+```bash
+git fetch upstream --tags
+git checkout -b chore/sync-upstream-vX.Y.Z dev
+git merge vX.Y.Z
+```
+
+При конфликтах в `frontend/src-tauri/tauri.conf.json` оставьте значения форка: `identifier` (`ru.kiriyk.meetily`), `productName`, `plugins.updater` (`pubkey` и `endpoints` на этот репозиторий). Версию поставьте `X.Y.Z-1` в `tauri.conf.json`, `frontend/package.json` и `frontend/src-tauri/Cargo.toml`. Затем тесты, слияние в `dev` и `main`.
+
+### Как выпустить релиз
+
+Ключ подписи обновлений хранится вне репозитория (`~/.tauri/meetily-ru.key` и пароль к нему); без него следующий релиз не сможет обновить уже установленные копии.
+
+```bash
+cd frontend
+TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/meetily-ru.key)" \
+TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(cat ~/.tauri/meetily-ru.key.password)" \
+pnpm run tauri:build
+```
+
+В релиз `vX.Y.Z-N` загрузите `.dmg`, `.app.tar.gz`, `.app.tar.gz.sig` и `latest.json` (его читает автообновление).
 ---
 
 <div align="center" style="border-bottom: none">

@@ -1,8 +1,8 @@
 {
     "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-    "productName": "meetily",
-    "version": "0.4.1",
-    "identifier": "com.meetily.ai",
+    "productName": "meetily-ru",
+    "version": "0.4.1-1",
+    "identifier": "ru.kiriyk.meetily",
     "build": {
         "frontendDist": "../out",
         "devUrl": "http://127.0.0.1:3118",
@@ -12,7 +12,7 @@
     "app": {
         "windows": [
             {
-                "title": "meetily",
+                "title": "Meetily RU",
                 "width": 1100,
                 "height": 700,
                 "resizable": true,
@@ -112,9 +112,9 @@
     },
     "plugins": {
         "updater": {
-            "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVDQTYzMUQ3ODc5N0M4MkEKUldRcXlKZUgxekdtN09DRkVWSHNpZlJseEVOUmpNd1dDSTNaLzZ3MXJGTnY3WW1pdnlOYjBpbkIK",
+            "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQyNzhBOUVDQzRDOTIxOEUKUldTT0ljbkU3S2w0UXZmVGVTSldLVGk0a1ZHVVA4NWU2cmN3eS9HT3hYNG5jajN4VzlKeG1BQloK",
             "endpoints": [
-                "https://github.com/Zackriya-Solutions/meeting-minutes/releases/latest/download/latest.json"
+                "https://github.com/kiriyk/meeting-minutes-russian/releases/latest/download/latest.json"
             ]
         }
     }
