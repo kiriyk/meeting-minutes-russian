@@ -6,7 +6,7 @@ import { SelectedDevices } from '@/components/DeviceSelection';
 import { configService, ModelConfig } from '@/services/configService';
 import { invoke } from '@tauri-apps/api/core';
 import Analytics from '@/lib/analytics';
-import { applyVadEngine, readStoredVadEngine, type VadEngine } from '@/lib/vad';
+import { applyVadEngine, readStoredVadEngine, DEFAULT_VAD_ENGINE, type VadEngine } from '@/lib/vad';
 import { BetaFeatures, BetaFeatureKey, loadBetaFeatures, saveBetaFeatures } from '@/types/betaFeatures';
 
 export interface OllamaModel {
@@ -64,6 +64,7 @@ interface ConfigContextType {
   // VAD engine preference
   vadEngine: VadEngine;
   setVadEngine: (engine: VadEngine) => void;
+  vadEngineError: string | null;
 
   // UI preferences
   showConfidenceIndicator: boolean;
@@ -154,7 +155,18 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
   });
 
   // VAD engine preference state
-  const [vadEngine, setVadEngineState] = useState<VadEngine>(() => readStoredVadEngine());
+  const [vadEngine, setVadEngineState] = useState<VadEngine>(DEFAULT_VAD_ENGINE);
+  const [vadEngineError, setVadEngineError] = useState<string | null>(null);
+  const vadEngineQueue = useRef<Promise<void>>(Promise.resolve());
+  const syncVadEngine = useCallback((engine: VadEngine): Promise<void> => {
+    const pending = vadEngineQueue.current.catch(() => {}).then(async () => {
+      await applyVadEngine(engine);
+      setVadEngineState(engine);
+      setVadEngineError(null);
+    });
+    vadEngineQueue.current = pending;
+    return pending;
+  }, []);
 
   // UI preferences state
   const [showConfidenceIndicator, setShowConfidenceIndicator] = useState<boolean>(() => {
@@ -261,10 +273,11 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
 
   // Sync VAD engine preference to Rust on mount (setting lives in memory only in Rust)
   useEffect(() => {
-    applyVadEngine(vadEngine).catch(err =>
-      console.error('[ConfigContext] Failed to sync VAD engine to Rust on startup:', err)
-    );
-  }, []);
+    syncVadEngine(readStoredVadEngine()).catch(err => {
+      console.error('[ConfigContext] Failed to sync VAD engine to Rust on startup:', err);
+      setVadEngineError('Не удалось подтвердить движок VAD. Фактический выбор неизвестен.');
+    });
+  }, [syncVadEngine]);
 
   // Load model configuration on mount
   useEffect(() => {
@@ -526,11 +539,13 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     );
   }, []);
 
-  // Wrapper for setVadEngine that persists to localStorage and syncs to Rust
+  // Keep the displayed choice in sync with the last acknowledged Rust command.
   const setVadEngine = useCallback((engine: VadEngine) => {
-    setVadEngineState(engine);
-    applyVadEngine(engine).catch(err => console.error('Failed to apply VAD engine:', err));
-  }, []);
+    syncVadEngine(engine).catch(err => {
+      console.error('Failed to apply VAD engine:', err);
+      setVadEngineError('Не удалось подтвердить движок VAD. Фактический выбор неизвестен.');
+    });
+  }, [syncVadEngine]);
 
   const value: ConfigContextType = useMemo(() => ({
     modelConfig,
@@ -548,6 +563,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     setSelectedLanguage: handleSetSelectedLanguage,
     vadEngine,
     setVadEngine,
+    vadEngineError,
     showConfidenceIndicator,
     toggleConfidenceIndicator,
     betaFeatures,
@@ -573,6 +589,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     handleSetSelectedLanguage,
     vadEngine,
     setVadEngine,
+    vadEngineError,
     showConfidenceIndicator,
     toggleConfidenceIndicator,
     betaFeatures,

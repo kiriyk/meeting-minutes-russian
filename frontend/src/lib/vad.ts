@@ -25,10 +25,10 @@ export function readStoredVadEngine(): VadEngine {
 
 /** Persists the choice and applies it in Rust; takes effect on the next recording or batch job. */
 export async function applyVadEngine(engine: VadEngine): Promise<void> {
+  await invoke('set_vad_engine', { engine });
   try {
     window.localStorage.setItem(STORAGE_KEY, engine);
   } catch (err) {
     console.error('Failed to persist VAD engine:', err);
   }
-  await invoke('set_vad_engine', { engine });
 }

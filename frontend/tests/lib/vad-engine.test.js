@@ -51,6 +51,14 @@ describe("VAD engine preference", () => {
     expect(invokeMock).toHaveBeenCalledWith("set_vad_engine", { engine: "earshot" });
   });
 
+  test("does not persist a choice rejected by Rust", async () => {
+    const values = installLocalStorage({ vadEngine: "silero_v6" });
+    invokeMock.mockImplementationOnce(async () => { throw new Error("IPC unavailable"); });
+
+    await expect(applyVadEngine("earshot")).rejects.toThrow("IPC unavailable");
+    expect(values.get("vadEngine")).toBe("silero_v6");
+  });
+
   test("apply still syncs to Rust when storage throws", async () => {
     Object.defineProperty(globalThis, "window", {
       configurable: true,

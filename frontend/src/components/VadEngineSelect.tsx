@@ -4,7 +4,7 @@ import { Label } from './ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 
 export function VadEngineSelect() {
-  const { vadEngine, setVadEngine } = useConfig();
+  const { vadEngine, setVadEngine, vadEngineError } = useConfig();
   const current = VAD_ENGINE_OPTIONS.find(option => option.value === vadEngine);
   return (
     <div>
@@ -23,6 +23,7 @@ export function VadEngineSelect() {
         <p className="mt-1 text-xs text-gray-500">
           {current?.description} Применяется к следующей записи, импорту и ретранскрибации.
         </p>
+        {vadEngineError && <p role="alert" className="mt-1 text-xs text-red-600">{vadEngineError}</p>}
       </div>
     </div>
   );
