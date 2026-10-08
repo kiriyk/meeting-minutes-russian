@@ -27,6 +27,7 @@ interface UseRecordingStartReturn {
 
 interface TranscriptConfig {
   provider?: string;
+  model?: string;
 }
 
 /**
@@ -68,28 +69,28 @@ export function useRecordingStart(
     return `Meeting ${day}_${month}_${year}_${hours}_${minutes}_${seconds}`;
   }, []);
 
-  const getTranscriptionProvider = useCallback(async (): Promise<string> => {
+  const getTranscriptionProvider = useCallback(async (): Promise<{ provider: string; model?: string }> => {
     try {
       const config = await invoke<TranscriptConfig | null>('api_get_transcript_config');
-      return config?.provider || 'parakeet';
+      return { provider: config?.provider || 'parakeet', model: config?.model };
     } catch (error) {
       console.error('Failed to load transcription provider:', error);
-      return 'parakeet';
+      return { provider: 'parakeet' };
     }
   }, []);
 
   // Check the selected local transcription provider, not a hardcoded engine.
   const checkTranscriptionModelReady = useCallback(async (): Promise<boolean> => {
     try {
-      const provider = await getTranscriptionProvider();
-      const commands = getProviderCommands(provider);
+      const { provider, model } = await getTranscriptionProvider();
+      const commands = getProviderCommands(provider, model);
 
       if (commands) {
         await invoke(commands.initialize);
         return await invoke<boolean>(commands.hasAvailableModels);
       }
 
-      console.error(`Unsupported transcription provider: ${provider}`);
+      console.error(`Unsupported transcription provider: ${provider} (model: ${model})`);
       return false;
     } catch (error) {
       console.error('Failed to check transcription model status:', error);
@@ -100,8 +101,8 @@ export function useRecordingStart(
   // Check download status for the selected local transcription provider.
   const checkIfModelDownloading = useCallback(async (): Promise<boolean> => {
     try {
-      const provider = await getTranscriptionProvider();
-      const commands = getProviderCommands(provider);
+      const { provider, model } = await getTranscriptionProvider();
+      const commands = getProviderCommands(provider, model);
       if (!commands) return false;
 
       const models = await invoke<ModelWithStatus[]>(commands.getAvailableModels);

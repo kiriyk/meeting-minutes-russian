@@ -22,6 +22,31 @@ describe('transcription model readiness', () => {
     });
   });
 
+  test('uses GigaAM commands for a GigaAM Russian ASR model', () => {
+    const gigaam = {
+      initialize: 'gigaam_init',
+      hasAvailableModels: 'gigaam_has_available_models',
+      getAvailableModels: 'gigaam_get_available_models',
+    };
+    expect(getProviderCommands('russianAsr', 'gigaam:gigaam-v3-e2e-rnnt')).toEqual(gigaam);
+    expect(getProviderCommands('russianAsr', 'gigaam-v3-e2e-rnnt')).toEqual(gigaam);
+  });
+
+  test('uses T-One commands for a T-One Russian ASR model', () => {
+    const tone = {
+      initialize: 'tone_init',
+      hasAvailableModels: 'tone_has_available_models',
+      getAvailableModels: 'tone_get_available_models',
+    };
+    expect(getProviderCommands('russianAsr', 'tone:t-one')).toEqual(tone);
+    expect(getProviderCommands('russianAsr', 't-one')).toEqual(tone);
+  });
+
+  test('rejects a Russian ASR model it cannot attribute to an engine', () => {
+    expect(getProviderCommands('russianAsr', 'whisper-large')).toBeNull();
+    expect(getProviderCommands('russianAsr')).toBeNull();
+  });
+
   test('does not silently treat an unsupported provider as Parakeet', () => {
     expect(getProviderCommands('deepgram')).toBeNull();
   });
